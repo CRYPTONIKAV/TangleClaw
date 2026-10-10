@@ -2170,6 +2170,7 @@ route('PATCH', '/api/config', async (_req, res, _params, body) => {
       masterModeReset = outcome.reset;
       warnings.push(master.masterLaunchModeResetWarning(outcome.reset));
     }
+    if (outcome.unused) warnings.push(master.masterLaunchModeUnusedWarning(outcome.unused));
   }
 
   // Validate HTTPS cert pair when HTTPS is enabled (mirrors /api/setup/complete).

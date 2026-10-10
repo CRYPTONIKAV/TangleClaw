@@ -459,13 +459,13 @@ describe('#2197 — the Master\'s launch mode belongs to the engine it was chose
     it('leaves the mode and its engine alone when the patch names neither', () => {
       const config = configWith(BYPASS_ON_CLAUDE);
       const out = master.masterLaunchModeAfterPatch(config, config, { autoStart: true });
-      assert.deepEqual(out, { launchMode: 'bypassPermissions', launchModeEngine: 'claude', reset: null, error: null });
+      assert.deepEqual(out, { launchMode: 'bypassPermissions', launchModeEngine: 'claude', reset: null, unused: null, error: null });
     });
 
     it('leaves them alone when the patch names the engine already set', () => {
       const config = configWith(BYPASS_ON_CLAUDE);
       const out = master.masterLaunchModeAfterPatch(config, config, { engine: 'claude' });
-      assert.deepEqual(out, { launchMode: 'bypassPermissions', launchModeEngine: 'claude', reset: null, error: null });
+      assert.deepEqual(out, { launchMode: 'bypassPermissions', launchModeEngine: 'claude', reset: null, unused: null, error: null });
     });
 
     it('treats the stored mode sent back unchanged as no choice at all', () => {
@@ -576,6 +576,47 @@ describe('#2197 — the Master\'s launch mode belongs to the engine it was chose
     assert.equal(out.reset, null);
   });
 
+  describe('a stored mode that belongs to another engine than the one set, sent back by a save', () => {
+    // The engine was changed where no save saw it: the mode is recorded for
+    // Claude Code and the Master is set to Codex, which defines the same key.
+    const stored = { engine: 'codex', launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
+
+    it('is not attached to the engine set now, and the answer says it will not run', () => {
+      const config = configWith(stored);
+      const out = master.masterLaunchModeAfterPatch(config, config, { launchMode: 'bypassPermissions', autoStart: true });
+      assert.equal(out.error, null);
+      assert.equal(out.launchMode, 'bypassPermissions');
+      assert.equal(out.launchModeEngine, 'claude', 'a resent key must never move a mode onto another engine');
+      assert.deepEqual(out.unused, { mode: 'bypassPermissions', chosenFor: 'claude', engine: 'codex' });
+    });
+
+    it('says nothing on a save that does not send the mode', () => {
+      const config = configWith(stored);
+      const out = master.masterLaunchModeAfterPatch(config, config, { autoStart: true });
+      assert.equal(out.unused, null);
+      assert.equal(out.launchModeEngine, 'claude');
+    });
+
+    it('can be left by choosing default, and then a mode for the engine set now', () => {
+      const config = configWith(stored);
+      const cleared = master.masterLaunchModeAfterPatch(config, config, { launchMode: 'default' });
+      assert.equal(cleared.launchMode, 'default');
+      const fresh = configWith({ engine: 'codex' });
+      const chosen = master.masterLaunchModeAfterPatch(fresh, fresh, { launchMode: 'bypassPermissions' });
+      assert.equal(chosen.launchMode, 'bypassPermissions');
+      assert.equal(chosen.launchModeEngine, 'codex');
+      assert.equal(chosen.unused, null);
+    });
+
+    it('the notice names the mode, both engines, what will run and the way out', () => {
+      const text = master.masterLaunchModeUnusedWarning({ mode: 'bypassPermissions', chosenFor: 'claude', engine: 'codex' });
+      assert.match(text, /still Bypass, chosen for Claude Code/);
+      assert.match(text, /not used on Codex/);
+      assert.match(text, /starts in Interactive/);
+      assert.match(text, /save Interactive first, then choose the mode/);
+    });
+  });
+
   describe('masterSettings', () => {
     it('reads the recorded engine, and null when there is none or it is not a string', () => {
       assert.equal(master.masterSettings({}).launchModeEngine, null);
@@ -644,6 +685,14 @@ describe('#2197 — the Master\'s launch mode belongs to the engine it was chose
       assert.equal(rt.engineId, 'codex');
       assert.equal(rt.launchMode, 'default');
       assert.equal(rt.launchModeEngine, 'claude');
+    });
+
+    it('a mode with no engine recorded and none configured is nobody\'s choice for the engine that starts', () => {
+      const orphan = configWith({ engine: null, launchMode: 'bypassPermissions' }, null);
+      const rt = master._masterRuntime(orphan, enginesInstalling(['codex']));
+      assert.equal(rt.engineId, 'codex', 'this fixture must resolve an engine, or it proves nothing');
+      assert.equal(rt.launchModeEngine, null);
+      assert.equal(rt.launchMode, 'default');
     });
 
     it('the status payload shows the stored mode, the engine it belongs to, and what will run', () => {

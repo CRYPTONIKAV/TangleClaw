@@ -1103,6 +1103,21 @@ describe('API endpoints', () => {
         assert.deepEqual(kept.data.warnings, []);
       });
 
+      it('says so when a save sends back a mode that belongs to another engine, and does not move it', async () => {
+        // Recorded for Claude Code while the Master is set to Codex, which
+        // defines the same key. A form resends the mode on any save.
+        given({ engine: 'codex', launchMode: 'bypassPermissions', launchModeEngine: 'claude' });
+        const { status, data } = await request(server, 'PATCH', '/api/config', {
+          master: { launchMode: 'bypassPermissions', autoStart: true }
+        });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchModeEngine, 'claude');
+        assert.equal(stored.autoStart, true, 'the rest of the save still applies');
+        assert.equal(data.warnings.length, 1);
+        assert.match(data.warnings[0], /still Bypass, chosen for Claude Code, and is not used on Codex/);
+      });
+
       it('refuses launchModeEngine from a caller, and stores nothing', async () => {
         given(BYPASS_ON_CLAUDE);
         const before = store.config.load().master;
