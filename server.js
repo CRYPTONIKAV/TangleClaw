@@ -1866,6 +1866,11 @@ function validateMasterPatch(patch, config) {
   }
   const known = ['accessLevel', 'engine', 'launchMode', 'scope', 'autoStart', 'medusaEnabled', 'medusaWake'];
   for (const key of Object.keys(patch)) {
+    // Said in full for this one, because it is a real stored field: a caller
+    // that could set it could attach a mode chosen for one engine to another.
+    if (key === 'launchModeEngine') {
+      return { error: 'master.launchModeEngine is not a settable field: TangleClaw records it when a launch mode is chosen. Send master.launchMode, with master.engine when the engine changes too.' };
+    }
     if (!known.includes(key)) return { error: `master.${key} is not a settable field` };
   }
   const merged = { ...master.masterSettings(config), ...patch };
@@ -1937,19 +1942,18 @@ function validateMasterPatch(patch, config) {
   if (typeof merged.medusaWake !== 'boolean') {
     return { error: 'master.medusaWake must be a boolean' };
   }
-  // Validated as a NAME, not against the current engine's honored set. A mode
-  // this engine cannot honor is a legitimate stored value — the operator may
-  // switch engines back — and `_masterRuntime` reconciles it to 'default' at
-  // launch. Rejecting it here would make the setting depend on which engine
-  // happened to be resolved at the moment of the PATCH. What must be refused is
-  // a mode no engine defines at all, which is a typo, not a choice.
+  // The NAME check only: a mode no engine defines at all is a typo, and the
+  // answer names the valid set. Whether the mode belongs to the engine the
+  // Master will have is judged once, by `master.masterLaunchModeAfterPatch` in
+  // the route, because that engine can also come from `defaultEngine` in the
+  // same request and is not known here.
   //
   // Only what this PATCH actually SENT is name-checked, unlike the fields
   // above. `knownLaunchModes()` is the union across INSTALLED engines, so
   // uninstalling an engine shrinks it — and validating the merged value would
   // then reject every master PATCH on the install, including ones that only
-  // toggle autoStart, over a stored mode the operator never touched. The
-  // reconcile at launch already handles a mode that has become unhonorable.
+  // toggle autoStart, over a stored mode the operator never touched. A stored
+  // mode the engine does not define starts as 'default' (`_masterRuntime`).
   if ('launchMode' in patch) {
     if (typeof patch.launchMode !== 'string' || !patch.launchMode) {
       return { error: 'master.launchMode must be a launch-mode id string' };
@@ -1968,6 +1972,9 @@ function validateMasterPatch(patch, config) {
       accessLevel: merged.accessLevel,
       engine: merged.engine,
       launchMode: merged.launchMode,
+      // Carried as stored, never from the patch (`known` above refuses it):
+      // the route sets it with the mode, from the one rule that pairs them.
+      launchModeEngine: merged.launchModeEngine,
       scope: merged.scope,
       autoStart: merged.autoStart,
       medusaEnabled: merged.medusaEnabled,
@@ -1998,6 +2005,11 @@ route('PATCH', '/api/config', async (_req, res, _params, body) => {
   // `config.master` wholesale, so the previous level has to be read before it.
   const oldMasterAccessLevel = master.masterSettings(config).accessLevel;
   const oldMasterMedusaEnabled = master.masterSettings(config).medusaEnabled;
+  // And for the engine the Master is set to, which the loop can change through
+  // `master.engine` or, for a Master that follows it, through `defaultEngine`.
+  // `config.master` is replaced below, never edited in place, so holding the
+  // reference keeps what was stored.
+  const masterEngineBefore = { defaultEngine: config.defaultEngine, master: config.master };
   // Whether setup was still OPEN when this request arrived. Captured here
   // because the loop below writes `body.setupComplete` straight onto `config` —
   // read it afterwards and every request looks like an install that was already
@@ -2140,6 +2152,26 @@ route('PATCH', '/api/config', async (_req, res, _params, body) => {
     }
   }
 
+  // The Master's launch mode belongs to the engine it was chosen for. Judged
+  // after the loop, once, because both fields that set the Master's engine may
+  // arrive in one request in either order. A save that touches neither cannot
+  // change the engine and is left alone, so an unrelated save never rewrites
+  // the stored Master block.
+  const warnings = [];
+  let masterModeReset = null;
+  if ('master' in body || 'defaultEngine' in body) {
+    const outcome = master.masterLaunchModeAfterPatch(masterEngineBefore, config, body.master);
+    if (outcome.error) return errorResponse(res, 400, outcome.error, 'BAD_REQUEST');
+    const held = master.masterSettings(config);
+    if (held.launchMode !== outcome.launchMode || held.launchModeEngine !== outcome.launchModeEngine) {
+      config.master = { ...held, launchMode: outcome.launchMode, launchModeEngine: outcome.launchModeEngine };
+    }
+    if (outcome.reset) {
+      masterModeReset = outcome.reset;
+      warnings.push(master.masterLaunchModeResetWarning(outcome.reset));
+    }
+  }
+
   // Validate HTTPS cert pair when HTTPS is enabled (mirrors /api/setup/complete).
   // Allow httpsEnabled=true with no cert paths — createServer() will log and fall
   // back to HTTP gracefully so existing installs don't break on upgrade.
@@ -2219,6 +2251,13 @@ route('PATCH', '/api/config', async (_req, res, _params, body) => {
   }
 
   store.config.save(config);
+
+  if (masterModeReset) {
+    log.info('Master launch mode reset to default: the engine set for the Master changed and the mode was chosen for the previous one', {
+      fromEngine: masterModeReset.fromEngine, toEngine: masterModeReset.toEngine,
+      fromMode: masterModeReset.mode, toMode: 'default'
+    });
+  }
 
   // The master's access level takes effect on its NEXT TOOL CALL, not its next
   // launch — that is the whole point of the level being a file the write guard
@@ -2371,10 +2410,15 @@ route('PATCH', '/api/config', async (_req, res, _params, body) => {
   const redacted = _withBindState(config);
 
   if (masterLevelError) {
-    return errorResponse(res, 500, masterLevelError, 'MASTER_LEVEL_NOT_APPLIED');
+    // The save stood, so a reset it made is said here too: this answer has no
+    // `warnings` field, and a setting changed without a word is what the
+    // warning exists to prevent.
+    return errorResponse(res, 500, [masterLevelError, ...warnings].join(' '), 'MASTER_LEVEL_NOT_APPLIED');
   }
 
-  jsonResponse(res, 200, { ok: true, config: redacted, requiresRestart });
+  // `warnings` is `[]` when there is nothing to say, never absent: a field that
+  // appears only sometimes makes every reader probe for it.
+  jsonResponse(res, 200, { ok: true, config: redacted, requiresRestart, warnings });
 });
 
 // AUTH-4b — service-token management. These are OPERATOR endpoints (gated by

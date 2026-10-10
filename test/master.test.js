@@ -1422,7 +1422,8 @@ function clearMasterRules() {
 describe('masterSettings normalization', () => {
   it('applies defaults for a missing/partial master block (shallow-merge safety)', () => {
     assert.deepEqual(master.masterSettings({}), {
-      accessLevel: 'read-only', engine: null, launchMode: 'default', scope: 'all', autoStart: false,
+      accessLevel: 'read-only', engine: null, launchMode: 'default', launchModeEngine: null,
+      scope: 'all', autoStart: false,
       medusaEnabled: false, medusaWake: false
     });
     const partial = master.masterSettings({ master: { autoStart: true } });
@@ -2785,7 +2786,9 @@ describe('ensureMasterSession — settings integration', () => {
 
     it('reconciles a mode the effective engine cannot honor down to default', () => {
       // `acceptEdits` is Claude's; aider defines `yesAlways` and knows nothing
-      // about it. Passing it through would hand the CLI a flag it rejects.
+      // about it. Passing it through would hand the CLI a flag it rejects. A
+      // save can no longer store this pair (#2197); a config file edited by
+      // hand, or written by an older version, still can.
       const { result, command } = ensureWithMaster(
         { launchMode: 'acceptEdits', engine: 'aider' },
         { enginesLib: enginesInstalling(['aider']) }
@@ -2796,10 +2799,10 @@ describe('ensureMasterSession — settings integration', () => {
     });
 
     it('does not FLATTEN the stored choice when an engine cannot honor it', () => {
-      // The reconcile happens at launch, not at rest. An operator who picks
-      // acceptEdits on Claude, switches the Master to aider, and switches back
-      // must find their choice intact rather than silently rewritten to
-      // 'default' on the way past.
+      // Starting a Master reads the stored mode and never rewrites it: the
+      // launch runs 'default' and the config still says what was stored. What
+      // resets a mode is a save that changes the Master's engine (#2197), and
+      // that is the save's to do and to report, not the launch's.
       const config = store.config.load();
       const saved = config.master;
       try {

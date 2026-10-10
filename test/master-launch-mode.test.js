@@ -25,7 +25,7 @@
  * regression net for it.
  */
 
-const { describe, it } = require('node:test');
+const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -325,6 +325,357 @@ describe('#756 — saving the launch mode', () => {
       assert.match(message, /launch mode/i,
         'the confirmation must not list only the settings it used to defer');
       assert.match(message, /next master start/i);
+    });
+  });
+});
+
+/*
+ * #2197 — a launch mode is a choice about one engine.
+ *
+ * Two engines can define a mode under one key and mean different things by it:
+ * `bypassPermissions` skips approvals on Claude Code and skips approvals AND
+ * the sandbox on Codex. A mode chosen for one must therefore never start the
+ * other, whichever way the Master's engine came to change: its own pin, the
+ * default engine it follows, or an installed engine standing in for a
+ * configured one that is missing.
+ *
+ * The server half, exercised on the real functions over the bundled engine
+ * profiles in a temporary store. The route's half is in
+ * `test/api-config.test.js`.
+ */
+describe('#2197 — the Master\'s launch mode belongs to the engine it was chosen for', () => {
+  const os = require('node:os');
+  const store = require('../lib/store');
+  const master = require('../lib/master');
+  const realEngines = require('../lib/engines');
+  const sessions = require('../lib/sessions');
+  const { setLevel } = require('../lib/logger');
+
+  let tmpDir;
+
+  before(() => {
+    setLevel('error');
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-master-mode-'));
+    store._setBasePath(tmpDir);
+    store.init();
+  });
+
+  after(() => {
+    store.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /**
+   * A config holding only what the launch-mode rule reads.
+   * @param {object} masterBlock - The stored `master` object.
+   * @param {string|null} [defaultEngine] - The install's default engine.
+   * @returns {object}
+   */
+  function configWith(masterBlock, defaultEngine = 'claude') {
+    return { defaultEngine, master: { accessLevel: 'read-only', engine: null, scope: 'all', autoStart: false, ...masterBlock } };
+  }
+
+  /**
+   * An engines stub that resolves by the real precedence over a stated set of
+   * installed engines, so no case here depends on which CLIs the host has.
+   * @param {string[]} installed - Engine ids present on the imagined machine.
+   * @returns {object}
+   */
+  function enginesInstalling(installed) {
+    const list = ['claude', 'codex', 'aider'].map((id) => ({ id, available: installed.includes(id) }));
+    return { resolveDefaultEngine: (config) => realEngines.resolveDefaultEngine(config, list) };
+  }
+
+  const BYPASS_ON_CLAUDE = { engine: 'claude', launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
+
+  describe('a save that changes the pinned engine', () => {
+    it('returns the mode to default and reports what it reset, when the save names no mode', () => {
+      const before_ = configWith(BYPASS_ON_CLAUDE);
+      const after_ = configWith({ ...BYPASS_ON_CLAUDE, engine: 'codex' });
+      const out = master.masterLaunchModeAfterPatch(before_, after_, { engine: 'codex' });
+      assert.equal(out.error, null);
+      assert.equal(out.launchMode, 'default');
+      assert.equal(out.launchModeEngine, null);
+      assert.deepEqual(out.reset, { mode: 'bypassPermissions', fromEngine: 'claude', toEngine: 'codex' });
+    });
+
+    it('keeps a mode the same save chooses, as a choice for the NEW engine, with nothing to report', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(BYPASS_ON_CLAUDE),
+        configWith({ ...BYPASS_ON_CLAUDE, engine: 'codex' }),
+        { engine: 'codex', launchMode: 'fullAuto' }
+      );
+      assert.equal(out.error, null);
+      assert.equal(out.launchMode, 'fullAuto');
+      assert.equal(out.launchModeEngine, 'codex');
+      assert.equal(out.reset, null);
+    });
+
+    it('reads the stored key sent again with a new engine as a choice for that engine', () => {
+      // Both engines define `bypassPermissions`. Naming it in the save that
+      // moves the Master to Codex is choosing Codex's, and it is recorded so.
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(BYPASS_ON_CLAUDE),
+        configWith({ ...BYPASS_ON_CLAUDE, engine: 'codex' }),
+        { engine: 'codex', launchMode: 'bypassPermissions' }
+      );
+      assert.equal(out.launchMode, 'bypassPermissions');
+      assert.equal(out.launchModeEngine, 'codex');
+      assert.equal(out.reset, null);
+    });
+
+    it('refuses a mode the new engine does not define, naming the engine and what it offers', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(BYPASS_ON_CLAUDE),
+        configWith({ ...BYPASS_ON_CLAUDE, engine: 'codex' }),
+        { engine: 'codex', launchMode: 'acceptEdits' }
+      );
+      assert.match(out.error, /"acceptEdits" is not a launch mode of Codex/);
+      assert.match(out.error, /fullAuto/, 'the refusal says what could be chosen instead');
+      assert.equal(out.reset, null);
+    });
+
+    it('lets the operator choose default for the new engine without calling it a reset', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(BYPASS_ON_CLAUDE),
+        configWith({ ...BYPASS_ON_CLAUDE, engine: 'codex' }),
+        { engine: 'codex', launchMode: 'default' }
+      );
+      assert.equal(out.launchMode, 'default');
+      assert.equal(out.launchModeEngine, null);
+      assert.equal(out.reset, null, 'a mode the operator chose is not a setting changed behind them');
+    });
+
+    it('has nothing to reset when the mode is already default', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith({ engine: 'claude' }), configWith({ engine: 'codex' }), { engine: 'codex' }
+      );
+      assert.equal(out.launchMode, 'default');
+      assert.equal(out.reset, null);
+    });
+  });
+
+  describe('a save that does not change the engine', () => {
+    it('leaves the mode and its engine alone when the patch names neither', () => {
+      const config = configWith(BYPASS_ON_CLAUDE);
+      const out = master.masterLaunchModeAfterPatch(config, config, { autoStart: true });
+      assert.deepEqual(out, { launchMode: 'bypassPermissions', launchModeEngine: 'claude', reset: null, error: null });
+    });
+
+    it('leaves them alone when the patch names the engine already set', () => {
+      const config = configWith(BYPASS_ON_CLAUDE);
+      const out = master.masterLaunchModeAfterPatch(config, config, { engine: 'claude' });
+      assert.deepEqual(out, { launchMode: 'bypassPermissions', launchModeEngine: 'claude', reset: null, error: null });
+    });
+
+    it('treats the stored mode sent back unchanged as no choice at all', () => {
+      // A settings form sends every field on every save. A stored mode the
+      // engine has since stopped defining must not turn every such save into a
+      // refusal over a setting nobody touched.
+      const config = configWith({ engine: 'claude', launchMode: 'mode-of-a-removed-engine', launchModeEngine: 'claude' });
+      const out = master.masterLaunchModeAfterPatch(config, config, { launchMode: 'mode-of-a-removed-engine', autoStart: true });
+      assert.equal(out.error, null);
+      assert.equal(out.launchMode, 'mode-of-a-removed-engine');
+      assert.equal(out.launchModeEngine, 'claude');
+    });
+
+    it('records a newly chosen mode for the engine the Master is set to', () => {
+      const config = configWith({ engine: 'codex' });
+      const out = master.masterLaunchModeAfterPatch(config, config, { launchMode: 'fullAuto' });
+      assert.equal(out.launchMode, 'fullAuto');
+      assert.equal(out.launchModeEngine, 'codex');
+    });
+
+    it('refuses a newly chosen mode the engine does not define', () => {
+      const config = configWith({ engine: 'aider' });
+      const out = master.masterLaunchModeAfterPatch(config, config, { launchMode: 'acceptEdits' });
+      assert.match(out.error, /"acceptEdits" is not a launch mode of Aider/);
+    });
+
+    it('refuses a mode when no engine is set for it to belong to', () => {
+      const config = configWith({ engine: null }, null);
+      const out = master.masterLaunchModeAfterPatch(config, config, { launchMode: 'acceptEdits' });
+      assert.match(out.error, /no engine is set for the Master/);
+    });
+
+    it('does not read a pin that only restates the default engine as a change', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith({ engine: null, launchMode: 'acceptEdits', launchModeEngine: 'claude' }, 'claude'),
+        configWith({ engine: 'claude', launchMode: 'acceptEdits', launchModeEngine: 'claude' }, 'claude'),
+        { engine: 'claude' }
+      );
+      assert.equal(out.launchMode, 'acceptEdits');
+      assert.equal(out.reset, null);
+    });
+  });
+
+  describe('a Master that follows the default engine', () => {
+    it('is reset when the default engine changes, with no master field in the save', () => {
+      const stored = { engine: null, launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
+      const out = master.masterLaunchModeAfterPatch(configWith(stored, 'claude'), configWith(stored, 'codex'), undefined);
+      assert.equal(out.launchMode, 'default');
+      assert.deepEqual(out.reset, { mode: 'bypassPermissions', fromEngine: 'claude', toEngine: 'codex' });
+    });
+
+    it('is untouched by a default-engine change while it is pinned', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(BYPASS_ON_CLAUDE, 'claude'), configWith(BYPASS_ON_CLAUDE, 'codex'), undefined
+      );
+      assert.equal(out.launchMode, 'bypassPermissions');
+      assert.equal(out.launchModeEngine, 'claude');
+      assert.equal(out.reset, null);
+    });
+
+    it('is reset when the pin is removed and the default engine is a different one', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(BYPASS_ON_CLAUDE, 'codex'),
+        configWith({ ...BYPASS_ON_CLAUDE, engine: null }, 'codex'),
+        { engine: null }
+      );
+      assert.equal(out.launchMode, 'default');
+      assert.deepEqual(out.reset, { mode: 'bypassPermissions', fromEngine: 'claude', toEngine: 'codex' });
+    });
+  });
+
+  describe('a mode stored before its engine was recorded', () => {
+    const UNRECORDED = { engine: 'claude', launchMode: 'acceptEdits' };
+
+    it('is read as chosen for the engine configured now, and still runs', () => {
+      const config = configWith(UNRECORDED);
+      assert.equal(master.masterLaunchModeOwner(config), 'claude');
+      const rt = master._masterRuntime(config, enginesInstalling(['claude']));
+      assert.equal(rt.launchMode, 'acceptEdits', 'an upgrade must not change how a running install starts');
+    });
+
+    it('has its engine recorded by the next save, whatever that save was for', () => {
+      const config = configWith(UNRECORDED);
+      const out = master.masterLaunchModeAfterPatch(config, config, { autoStart: true });
+      assert.equal(out.launchMode, 'acceptEdits');
+      assert.equal(out.launchModeEngine, 'claude');
+      assert.equal(out.reset, null);
+    });
+
+    it('stops carrying at the next engine change, like any other mode', () => {
+      const out = master.masterLaunchModeAfterPatch(
+        configWith(UNRECORDED), configWith({ ...UNRECORDED, engine: 'aider' }), { engine: 'aider' }
+      );
+      assert.equal(out.launchMode, 'default');
+      assert.deepEqual(out.reset, { mode: 'acceptEdits', fromEngine: 'claude', toEngine: 'aider' });
+    });
+  });
+
+  it('keeps a mode already recorded for the engine being switched to', () => {
+    // Reachable when the engine was changed where no save could see it (a
+    // hand-edited config file) and is now being set back.
+    const stored = { engine: 'codex', launchMode: 'acceptEdits', launchModeEngine: 'claude' };
+    const out = master.masterLaunchModeAfterPatch(
+      configWith(stored), configWith({ ...stored, engine: 'claude' }), { engine: 'claude' }
+    );
+    assert.equal(out.launchMode, 'acceptEdits');
+    assert.equal(out.launchModeEngine, 'claude');
+    assert.equal(out.reset, null);
+  });
+
+  describe('masterSettings', () => {
+    it('reads the recorded engine, and null when there is none or it is not a string', () => {
+      assert.equal(master.masterSettings({}).launchModeEngine, null);
+      assert.equal(master.masterSettings({ master: { launchModeEngine: 'codex' } }).launchModeEngine, 'codex');
+      assert.equal(master.masterSettings({ master: { launchModeEngine: 7 } }).launchModeEngine, null);
+      assert.equal(master.masterSettings({ master: { launchModeEngine: '' } }).launchModeEngine, null);
+    });
+
+    it('answers no owner for the default mode, whatever is recorded beside it', () => {
+      assert.equal(master.masterLaunchModeOwner(configWith({ launchMode: 'default', launchModeEngine: 'codex' })), null);
+    });
+  });
+
+  describe('the reset notice', () => {
+    it('names both engines and both modes by their labels', () => {
+      const text = master.masterLaunchModeResetWarning({ mode: 'bypassPermissions', fromEngine: 'claude', toEngine: 'codex' });
+      assert.match(text, /reset to Interactive/);
+      assert.match(text, /Bypass was chosen for Claude Code/);
+      assert.match(text, /does not carry to Codex/);
+      assert.match(text, /Choose a launch mode for Codex/);
+    });
+
+    it('still names an engine it has no profile for, by its id', () => {
+      const text = master.masterLaunchModeResetWarning({ mode: 'acceptEdits', fromEngine: 'claude', toEngine: 'no-such-engine' });
+      assert.match(text, /Accept Edits was chosen for Claude Code/);
+      assert.match(text, /does not carry to no-such-engine/);
+      assert.match(text, /reset to default/, 'with no profile there is no label, so the key is shown');
+    });
+  });
+
+  describe('at launch, when the engine that starts is not the one the mode was chosen for', () => {
+    // Claude Code is configured and not installed; Codex stands in for it. No
+    // save ever saw that change, so only the launch can refuse the carry.
+    const SUBSTITUTED = enginesInstalling(['codex']);
+    const config = configWith({ engine: 'claude', launchMode: 'bypassPermissions', launchModeEngine: 'claude' });
+
+    it('starts in default and leaves the stored choice as it was', () => {
+      const rt = master._masterRuntime(config, SUBSTITUTED);
+      assert.equal(rt.engineId, 'codex', 'this fixture must substitute, or it proves nothing');
+      assert.equal(rt.launchMode, 'default');
+      assert.equal(rt.launchModeEngine, 'claude');
+      assert.equal(rt.settings.launchMode, 'bypassPermissions', 'the stored choice is still the operator\'s, for Claude Code');
+      assert.equal(config.master.launchMode, 'bypassPermissions', 'and nothing rewrote the config it was read from');
+    });
+
+    it('puts no flag of the old engine\'s mode into the command that starts the new engine', () => {
+      const rt = master._masterRuntime(config, SUBSTITUTED);
+      const profile = store.engines.get(rt.engineId);
+      const command = sessions._buildLaunchCommand(profile, null, rt.launchMode);
+      const carried = sessions._buildLaunchCommand(profile, null, 'bypassPermissions');
+      assert.match(carried, /--dangerously-bypass-approvals-and-sandbox/,
+        'this is what the carried mode would have started Codex with');
+      assert.doesNotMatch(command, /--dangerously/);
+      assert.equal(command, sessions._buildLaunchCommand(profile, null, 'default'));
+    });
+
+    it('still runs the mode on the engine it was chosen for', () => {
+      const rt = master._masterRuntime(config, enginesInstalling(['claude', 'codex']));
+      assert.equal(rt.engineId, 'claude');
+      assert.equal(rt.launchMode, 'bypassPermissions');
+    });
+
+    it('does the same for a mode with no engine recorded: it belongs to the configured engine, not the stand-in', () => {
+      const unrecorded = configWith({ engine: 'claude', launchMode: 'bypassPermissions' });
+      const rt = master._masterRuntime(unrecorded, SUBSTITUTED);
+      assert.equal(rt.engineId, 'codex');
+      assert.equal(rt.launchMode, 'default');
+      assert.equal(rt.launchModeEngine, 'claude');
+    });
+
+    it('the status payload shows the stored mode, the engine it belongs to, and what will run', () => {
+      const saved = store.config.load();
+      const home = fs.mkdtempSync(path.join(tmpDir, 'home-'));
+      const tmuxLib = {
+        probeSession: () => ({ live: false, answered: true, cause: null }),
+        sessionCreatedAt: () => ({ createdAt: null, answered: true, cause: null }),
+        hasSession: () => false
+      };
+      try {
+        store.config.save({ ...saved, defaultEngine: 'claude', master: config.master });
+        const st = master.getMasterStatus({ home, tmuxLib, enginesLib: SUBSTITUTED });
+        assert.equal(st.settings.launchMode, 'bypassPermissions');
+        assert.equal(st.settings.launchModeEngine, 'claude');
+        assert.equal(st.settings.resolvedEngine, 'codex');
+        assert.equal(st.settings.resolvedLaunchMode, 'default');
+      } finally {
+        store.config.save(saved);
+      }
+    });
+
+    it('the status payload carries null for the default mode', () => {
+      const home = fs.mkdtempSync(path.join(tmpDir, 'home-'));
+      const tmuxLib = {
+        probeSession: () => ({ live: false, answered: true, cause: null }),
+        sessionCreatedAt: () => ({ createdAt: null, answered: true, cause: null }),
+        hasSession: () => false
+      };
+      const st = master.getMasterStatus({ home, tmuxLib, enginesLib: enginesInstalling(['claude']) });
+      assert.equal(st.settings.launchMode, 'default');
+      assert.equal(st.settings.launchModeEngine, null);
     });
   });
 });
