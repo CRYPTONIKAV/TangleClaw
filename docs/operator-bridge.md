@@ -12,7 +12,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 
 | Part | State |
 |---|---|
-| Storage (schema v52, reshaped by v53, extended by v54) | Built |
+| Storage (schema v52, reshaped by v53, extended by v54; v62 admits a fourth notification type) | Built |
 | The Project Master's bridge credential | Built |
 | Gateway: accept, resolve, dispatch, hold the reply, release | Built |
 | `tc bridge` for the Project Master, routing and answering included | Built |
@@ -20,6 +20,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | The operator's policy routes: enable, allowlist, token, aliases, pins | Built |
 | The candidate lane: a session offers, the Master decides | Built |
 | The three typed server notifications | Built |
+| A fourth, `lane-silent` (#2262) | Admitted by the schema and given its limit; nothing raises one yet |
 | Discord helper (`bin/tc-bridge-helper`) | Built; not yet run against Discord. See [operator-bridge-helper.md](operator-bridge-helper.md) |
 | The operator's dashboard panel (global settings, Operator bridge) | Built; not yet used by a person on a live install |
 | Cutover | Not started; Rule #145 is unchanged and in force |
@@ -666,6 +667,13 @@ name or a count the server resolved, never anything a session or the operator ty
 | `operator-needed` | the Medusa watchdog raises an exchange between sessions to its operator rung. Since #2086 that includes ordinary mail left long enough. The sentence says why it was raised (unread, read and unanswered, held by configuration, stalled), from the watchdog's own reason. Never the bridge's own send to a project. | that exchange |
 | `fleet-idle` | the fleet is seen to become idle: every live lane finished and clear | the episode: when it began and which lanes were in it |
 
+A fourth type, `lane-silent`, is admitted and not yet raised (operator ruling, 2026-10-10; ADR
+0023 Decision 9 as amended). It is for a lane whose expired workload report drew no answer and
+whose escalation was recorded for the operator
+([fleet-workload.md](fleet-workload.md), "When the nudge goes unanswered"). Since schema v62 the
+queue accepts an item of this type and lets an uncollected one go after 7 days. No template
+and no pass exists for it, so no such item is ever queued: that ships as its own change.
+
 - **Found, not pushed.** Nothing calls the bridge when an event happens. The gateway's pass
   reads the records that are the events and enqueues a notification for each that has none,
   under a key naming that record. One that could not be enqueued is found again on the next
@@ -994,6 +1002,15 @@ v54 also retires `idx_bridge_routes_conversation`, an index v52 created and noth
 is dropped by the upgrade and again at every boot, and its presence after that fails the shape
 check.
 
+Schema v62 changed one table (#2262). `bridge_outbound` admits a fourth notification type,
+`lane-silent`, in the CHECK on `notify_type`. The v62 migration rebuilds that one table and
+carries every row, column and row id over, with the highest id the queue ever issued, so the id
+of a removed item is not issued again. The tables that point at an item (its leases, claims and
+posted parts) are not touched. It first proves the store is a sound v61 store and refuses one
+that is not, before touching anything. A store already in the v62 shape has nothing rebuilt.
+The v62 shape is a superset of every earlier one. The store's versions 55 to 61 did not touch
+the bridge, so the bridge's own shape goes from v54 to v62.
+
 | Table | Holds |
 |---|---|
 | `bridge_settings` | The operator's switches. The bridge is off unless `enabled` is `true`. |
@@ -1042,7 +1059,7 @@ starts, before any helper request is heard. Revoked pins and helper tokens leave
 | A delivery-failure notice | Let go after 30 days, then kept 30 days |
 | An undecided or uncollected `milestone` candidate | Let go after 7 days, then kept 30 days |
 | An undecided or uncollected `operator-action-required` candidate | Let go after 30 days, then kept 30 days |
-| An uncollected `work-blocked` or `operator-needed` notification | Let go after 7 days, then kept 30 days |
+| An uncollected `work-blocked`, `operator-needed` or `lane-silent` notification | Let go after 7 days, then kept 30 days |
 | An uncollected `fleet-idle` notification or route status notice | Let go after 24 hours, then kept 30 days |
 | Revoked Master generations | 90 days; the newest generation is always kept, so a number is never reused |
 | Audit rows | 90 days, then compacted |
