@@ -47,6 +47,15 @@ mirrored rule stays as written because it is correct everywhere else.
   and can pin a commit whose `version.json` disagrees with the tag. `docs/release-process.md` is the
   authority on how a release is cut here, and it cites this exception.
 - **The post-commit hook is opt-in**, and is not the tagger — see `docs/release-process.md`.
+- **In a lane test bed project, a Builder does not edit `CHANGELOG.md` or `FEATURES.md` on its branch.**
+  Core Rules says to update `CHANGELOG.md` with every change, and the Releases & Versioning rule has each
+  merged PR add to `[Unreleased]`. Not in a lane: those two files are shared by every lane building at
+  once, so a Builder puts its entries in the PR description, complete and ready to paste, and the
+  Integrator lands the whole batch's entries in one records PR. `.prawduct/change-log.md` is the other
+  way round: the Builder does add its own entry there, on its branch. This holds only in a clone launched
+  as a lane (a Builder working under an Integrator and a shared lane queue); every other checkout of this
+  repo updates `CHANGELOG.md` as the rules say. The project's own rules, read with `tc rules`, are the
+  authority, and they say which of the two a session is in.
 
 # Global Rules
 

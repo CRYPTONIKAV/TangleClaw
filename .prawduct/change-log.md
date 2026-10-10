@@ -62,6 +62,24 @@ Visual change: no
 **By hand, once.** The migration was run on a scratch copy of a copy of the live v61 database that the Integrator took with `sqlite3 .backup`. The result is in the PR.
 
 **Not built here.** No template, no pass and no caller: nothing on this commit queues a `lane-silent` item. `lib/bridge-notify.js`, `lib/medusa.js`, `lib/bridge-gateway.js` and `public/` are untouched.
+## 2026-10-10 — #2271: `CLAUDE.md` names the lane test bed's changelog exception
+
+<!-- prawduct: type=docs | scope=docs-2271 -->
+Chunk 01, the plan's only chunk. Branch `docs/2271-batch1-doc-corrections`, from `origin/main` `1539626c`.
+
+Visual change: no
+
+**What was wrong.** `CLAUDE.md`'s Core Rules say "Update CHANGELOG.md with every change", and the mirrored Releases & Versioning rule has each merged PR add to `[Unreleased]`. In a lane test bed project the project's own rules say the opposite for a Builder: `CHANGELOG.md` and `FEATURES.md` stay off its branch, and the Integrator lands the batch's entries in one records PR. The section that exists to record where this repo departs from those rules did not say so, so a session that read only the file a fresh clone gets would follow the Core Rule.
+
+**What changed.** One bullet added to "This Repo's Exceptions To The Global Rules Below". It says that in a lane a Builder does not edit `CHANGELOG.md` or `FEATURES.md` on its branch and puts those entries in the PR description; that `.prawduct/change-log.md` is the other way round and the Builder does add its entry there; that this holds only in a clone launched as a lane; and that the project's own rules, read with `tc rules`, are the authority.
+
+**Decided.** The exception is scoped to lane clones, because `CLAUDE.md` is shared by every checkout of this repo and most are not lanes. It points at the rules by how they are read, not by number: rule numbers differ per project and change when a rule is replaced. "Core Rules" is left as written, since it is right everywhere else.
+
+**How the commit was built.** Every clone's `CLAUDE.md` carries the server's own uncommitted rewrite of its generated block. The edit was made in a copy of the committed file and put in the index with `git update-index --cacheinfo`, so the working file was never staged. Read before committing: the staged diff was the one hunk in the exceptions section, and the working diff's two hunks were the server's, unchanged.
+
+**Not in this change.** The issue's other two items are about files git ignores, so no commit carries them. Item 1 (the preferences file's merge-strategy lines contradicting each other) is corrected in this lane's own copy and the replacement text is in the PR description for the other clones; it does not settle #2162, which stays open. Item 3 (a session's rules file going stale when a rule changes mid-session) is a product gap, filed as #2273.
+
+**Not covered.** Whether a session that reads only `CLAUDE.md` now behaves differently: that is judgment, not something a test shows. No test reads the exceptions section; `test/repo-governance-reference.test.js`, the one test that reads this repo's own `CLAUDE.md`, passes.
 
 ## 2026-10-09 — #2262: a nudge that goes unanswered is escalated once, to the coordinator the lane names
 
