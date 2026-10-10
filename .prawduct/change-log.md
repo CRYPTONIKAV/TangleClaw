@@ -35,6 +35,34 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-10 — #2262: the operator bridge admits a fourth typed notification, `lane-silent`, and nothing raises one yet
+
+<!-- prawduct: type=feature | scope=2262-workload-nudge -->
+
+#2262 Chunk 04 of five. Branch `feat/2262-bridge-lane-silent`, from `origin/main` `1539626c`. Everything the operator route's producer will stand on, and nothing that sends. The producer is Chunk 05.
+
+Visual change: no
+
+**Why.** A silent lane with nobody to tell is recorded on the operator route and reaches nobody. The Operator ruled on 2026-10-10 that this record is to reach them as a typed bridge notification, which amends ADR 0023 Decision 9. The bridge's notification types are a closed list held in three places, and one of them is a CHECK on `bridge_outbound.notify_type`, which SQLite cannot alter in place. Admitting the type therefore rebuilds the live outbound queue's table, and that is reviewed here on its own, apart from the code that will write to it.
+
+**What changed.**
+- `lib/bridge-schema.js`: `lane-silent` joins `NOTIFICATION_TYPES`, so the DDL's CHECK admits it. The shape marker `BRIDGE_SCHEMA_VERSION` goes from 54 to 62, `LATER_VERSIONS` gains 62, and `bridge_outbound` gains a `needsSince62` fragment, which is how an old table is recognised and rebuilt. `hasBridgeTables` is new: whether a store holds any bridge table.
+- `lib/store.js`: `CURRENT_SCHEMA_VERSION` 62 and the v61 to v62 step, `_migrateOperatorBridgeV62`, which calls `upgradeBridgeTables` as the v53 and v54 steps do: prove the store is a sound v61 store, rebuild the one stale table with every row, column and id and the id sequence, then re-create and verify the whole bridge schema, in one transaction.
+- `lib/bridge-store.js`: `EXPIRY_MS.notification` gives `lane-silent` 7 days, as `work-blocked` and `operator-needed` have.
+- `docs/adr/0023-master-mediated-operator-bridge.md`: Decision 9 amended with the ruling, the type's producer, its limit, and that it is admitted before it is produced; Decision 8 item 2 reads "four".
+- `docs/operator-bridge.md`: the status table, the notifications section, the storage section (v62) and the retention table.
+
+**Decisions.**
+- [DECISION: the bridge's shape marker is 62, not 55 as the plan and the lane row said. | The marker and the `needsSinceN` keys are store schema versions: `upgradeBridgeTables(db, from)` checks the store against what version `from` required. Numbered 55, a real v55 to v61 store would be judged against a shape it never had and refused as unsound. | The plan is corrected; reported to the Integrator.]
+- [DECISION: a v61 store with no bridge table at all is not refused: its bridge storage is created whole. | `upgradeBridgeTables` refuses a store that is not sound, and a store with no bridge tables is not a sound v61 store. But `test/session-rule-lifecycle.test.js` builds a store stamped v55 holding only the tables it tests, and until now every boot simply created the bridge's tables for it. Refusing would have broken that test, which is not this chunk's to change, and there is nothing in such a store to protect. A store holding some bridge tables and not others is still refused, before anything is touched. | Not in the plan; reported to the Integrator.]
+- [DECISION: `lane-silent` goes last in the list. | The v61 table's SQL is then the v62 SQL with one item removed from the end of the list, which is what the migration test's v61 store is built from.]
+
+**Tests.** `test/store-bridge-migration.test.js`: a v61 queue refuses the type; a v61 store whose queue was filled through the bridge's own writers (an item waiting, one under a live lease, one delivered in two messages, one set aside, one withdrawn, a status item, and two removed) migrates with every column of every row of the queue, its parts, leases and claims unchanged, has the shape of a fresh store, accepts `lane-silent`, still refuses the two reserved types, does not reuse a removed item's id, and still works as a queue afterwards; a second boot rebuilds nothing (the table's root page is unchanged); an unsound v61 store and one that lost its queue table are refused with the stamp left at 61; a store with no bridge tables is created whole; the v62 shape satisfies what versions 52, 53, 54 and 61 required. `test/bridge-retention.test.js`: the exact limits and the boundary test gain the fourth type.
+
+**By hand, once.** The migration was run on a scratch copy of a copy of the live v61 database that the Integrator took with `sqlite3 .backup`. The result is in the PR.
+
+**Not built here.** No template, no pass and no caller: nothing on this commit queues a `lane-silent` item. `lib/bridge-notify.js`, `lib/medusa.js`, `lib/bridge-gateway.js` and `public/` are untouched.
+
 ## 2026-10-09 — #2262: a nudge that goes unanswered is escalated once, to the coordinator the lane names
 
 <!-- prawduct: type=feature | scope=2262-workload-nudge -->
