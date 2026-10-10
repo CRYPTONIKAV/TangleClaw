@@ -197,10 +197,10 @@ notification, not as a candidate a session submits and not as a session's own se
   server resolved, never text a session or the operator typed.
 - **It keeps for 7 days,** as `work-blocked` and `operator-needed` do (Decision 20's limits):
   a lane nobody has heard from is still so until somebody acts.
-- **Admitted before it is produced.** The types are a closed list held in three places that a
-  test keeps equal: this Decision, the CHECK on `bridge_outbound.notify_type` (schema v62) and
-  the retention limits. Schema v62 admits the type; nothing raises one until the producer's
-  change ships.
+- **Admitted before it is produced.** The types are a closed list held in three places: this
+  Decision, the CHECK on `bridge_outbound.notify_type` (schema v62) and the retention limits.
+  A test keeps the last two equal. Schema v62 admits the type; nothing raises one until the
+  producer's change ships.
 
 The two reserved types stay reserved.
 
