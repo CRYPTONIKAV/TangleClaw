@@ -48,7 +48,7 @@ Each live lane carries three separate blocks, and a fourth when it was nudged or
 | `engine` | What the pane was observed doing: `busy`, `at-rest`, `not-at-rest` or `unknown`, with `reason`, `observedAt`, `ageSeconds` |
 | `workload` | The newest receipt, with `provenance`: `explicit-receipt`, `stale` (with `staleReason`) or `none`. `narrowing` is present when the operator has narrowed the lane |
 | `composed` | The verdict: `availability`, `clearance`, and the `reasons` behind it |
-| `nudge` | `null`, or what was done about the lane's stale receipt and not answered: `nudgedAt`, `receiptSeq`, `ageSeconds` for the nudge (`nudgedAt` is `null` on a lane escalated without one, and `notNudgedReason` then says why), and `escalatedAt`, `escalatedAgeSeconds`, `escalationRoute` (`coordinator` or `operator`) and `escalatedTo` (the coordinator project's name, `null` on the operator route) for the escalation. See [Nudging a lane whose report expired](#nudging-a-lane-whose-report-expired) |
+| `nudge` | `null`, or what was done about the lane's stale receipt and not answered: `nudgedAt`, `receiptSeq`, `ageSeconds` for the nudge (`nudgedAt` is `null` on a lane escalated without one, and `notNudgedReason` then says why), and `escalatedAt`, `escalatedAgeSeconds`, `escalationRoute` (`coordinator` or `operator`) and `escalatedTo` (the coordinator project's name, `null` on the operator route) for the escalation. `operatorNotice` is what became of the operator's notice for an escalation on the operator route: `null` when none was raised, else the state of its item in the bridge's outbound queue (`ready`, `blocked`, `delivered`, `dropped`); it is `null` on every other lane. See [Nudging a lane whose report expired](#nudging-a-lane-whose-report-expired) |
 
 **`availability`**, first match wins:
 
@@ -92,7 +92,7 @@ A nudge that no fresh receipt answers within `workloadNudge.escalateAfterMinutes
 - **A fresh receipt first means no escalation**, ever, for that expiry.
 - **A lane that could not be nudged is escalated too**, with the reason, once the same number of minutes has passed since its report expired: a web UI session, an engine with no wake profile, a pane showing a startup dialog, a pane that could not be typed into, or an engine observed `busy`, `not-at-rest` or `unknown` at that moment. If its pane comes to rest first it is nudged instead, and the time then runs from the nudge. Once escalated without a nudge it is not nudged later for that report.
 - **A lane left alone on purpose is not escalated.** One that is held or stopped, or running a wrap, is neither nudged nor escalated while that lasts.
-- **A lane with nobody to tell is recorded on the operator route.** That is a lane that names no coordinator or names itself, one whose coordinator is not a project on this install or has no live session, and one whose message the Hub refused five times running. The reason the coordinator could not be reached is recorded as its own row. **Nothing is sent on the operator route in this version**: the row is the record that the operator is owed the news, and nothing delivers it yet.
+- **A lane with nobody to tell is recorded on the operator route.** That is a lane that names no coordinator or names itself, one whose coordinator is not a project on this install or has no live session, and one whose message the Hub refused five times running. The reason the coordinator could not be reached is recorded as its own row. The row is the record that the operator is owed the news, and the monitor itself sends nothing for it. **While the [operator bridge](operator-bridge.md#server-notifications) is enabled, the bridge raises one `lane-silent` notification from that row**, which its chat helper posts to the operator. With the bridge off, or for a row recorded before it was last enabled, nothing is raised and the row stays a record only.
 
 `tc sessions` shows all of this on the lane's line, after the engine's reading, and the session's own `tc workload show` says the same on its "Coordinators see" line:
 
@@ -102,7 +102,10 @@ A nudge that no fresh receipt answers within `workloadNudge.escalateAfterMinutes
 | `; nudged 14m ago, not yet answered` | silent and nudged |
 | `; nudged 14m ago, escalated to TC-Lane-INT 4m ago` | silent, nudged, and its coordinator was told |
 | `; not nudged (startup dialog), escalated to TC-Lane-INT 4m ago` | silent, could not be nudged, and its coordinator was told |
-| `; nudged 14m ago, nobody to escalate to: recorded for the operator 4m ago, nothing sent` | silent, nudged, and nobody could be told |
+| `; nudged 14m ago, nobody to escalate to: recorded for the operator 4m ago, no notice raised` | silent, nudged, no coordinator could be told, and the operator was not told either: the bridge is off, or has not made its pass yet |
+| `… recorded for the operator 4m ago, notice queued, not yet delivered` | the same, and a `lane-silent` notice is waiting for the chat helper to collect it |
+| `… recorded for the operator 4m ago, notified` | the same, and the helper reported the notice posted |
+| `… recorded for the operator 4m ago, notice held, not delivered` or `notice not delivered` | the same, and the notice was set aside, or let go uncollected or withdrawn. Nobody was told |
 
 The clause goes when the session writes a fresh receipt.
 
@@ -118,7 +121,10 @@ What the monitor never does: it clears, restarts and ends nothing, and it writes
 - An escalation is a message to another session. A coordinator that is itself wedged will not act on it, and nothing checks that it did.
 - Nothing is restarted or cleared, for the silent lane or for its coordinator. What to do about a silent lane is the coordinator's decision.
 - A lane that never reported is not watched. The monitor acts only on a receipt that expired by age; a session that has written no receipt in its launch is neither nudged nor escalated.
-- The operator route delivers nothing yet. A silent coordinator, and a lane with no reachable coordinator, are recorded and shown in `tc sessions`, and no notification leaves the server.
+- The operator route reaches the operator only through the operator bridge. With the bridge disabled, a silent coordinator and a lane with no reachable coordinator are recorded and shown in `tc sessions`, and no notification leaves the server. A row recorded while the bridge was off is not notified when it is turned on: the bridge delivers no backlog.
+- "Notified" means the chat helper reported the notice posted. Nothing checks that the operator read it.
+- The notice says how long the lane had been silent when the escalation was recorded, not when the notice is read.
+- `operatorNotice` is read from the bridge's outbound queue, which removes a settled item after 30 days. A lane still silent on the same report after that reads `no notice raised` again.
 - The message is sent before the escalation is recorded, so that no escalation is on record for a message the Hub refused. A send that fails is tried again on the next tick, up to five times by one server process; the count starts again after a restart. If the Hub accepts the message and the record then cannot be written, the server remembers it, retries the write every tick and does not send again; a restart while the write is still failing is the one case in which a coordinator can get the message twice for one expiry.
 - A session that reports while its escalation is already on its way to the Hub is still escalated for that expiry.
 - Why a lane was not nudged is recorded only when it is escalated. Until then it is in the server log: the monitor logs each session's verdict, with its meaning, whenever it changes.
