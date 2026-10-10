@@ -329,8 +329,34 @@ describe('tc verb roster (lib/tc-verbs)', () => {
         ...stale,
         nudge: block({ escalatedAt: '2026-10-09T12:10:00.000Z', escalatedAgeSeconds: 4 * 60, escalationRoute: 'operator' })
       });
-      assert.match(line, /; nudged 14m ago, nobody to escalate to: recorded for the operator 4m ago, nothing sent$/);
+      assert.match(line, /; nudged 14m ago, nobody to escalate to: recorded for the operator 4m ago$/, 'a server that reports no notice state gets no claim about one');
       assert.equal(line.includes('escalated to'), false);
+      assert.equal(line.includes('notified'), false);
+    });
+
+    it('says what became of the operator\'s notice, and "notified" only for one that was delivered', () => {
+      const said = (operatorNotice) => renderLaneLine({
+        ...stale,
+        nudge: block({ escalatedAt: '2026-10-09T12:10:00.000Z', escalatedAgeSeconds: 4 * 60, escalationRoute: 'operator', operatorNotice })
+      });
+      assert.match(said(null), /recorded for the operator 4m ago, no notice raised$/);
+      assert.match(said('ready'), /recorded for the operator 4m ago, notice queued, not yet delivered$/);
+      assert.match(said('blocked'), /recorded for the operator 4m ago, notice held, not delivered$/);
+      assert.match(said('dropped'), /recorded for the operator 4m ago, notice not delivered$/);
+      assert.match(said('delivered'), /recorded for the operator 4m ago, notified$/);
+      assert.match(said('a state from a later server'), /recorded for the operator 4m ago, notice state unknown$/);
+      for (const state of [null, 'ready', 'blocked', 'dropped', 'toString']) {
+        assert.equal(/, notified$/.test(said(state)), false, `${state} is not a delivery`);
+        assert.equal(said(state).includes('nothing sent'), false);
+      }
+    });
+
+    it('says nothing about an operator notice on a lane whose coordinator was told', () => {
+      const line = renderLaneLine({
+        ...stale,
+        nudge: block({ escalatedAt: '2026-10-09T12:10:00.000Z', escalatedAgeSeconds: 4 * 60, escalationRoute: 'coordinator', escalatedTo: 'TC-Lane-INT', operatorNotice: null })
+      });
+      assert.match(line, /escalated to TC-Lane-INT 4m ago$/);
     });
 
     it('a coordinator project that is gone, and a missing age, still read as escalated', () => {

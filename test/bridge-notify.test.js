@@ -1,6 +1,6 @@
 'use strict';
 
-// #2031 (ADR 0023 Decisions 8 and 9): the three typed server notifications.
+// #2031, #2262 (ADR 0023 Decisions 8 and 9): the typed server notifications.
 // Each is found from the record that is the event, enqueued once under a key
 // that names that record, written from a fixed template, and only for events
 // that happened while the bridge was enabled. Fleet-idle fails closed.
@@ -17,6 +17,8 @@ setLevel('error');
 const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const bridgeNotify = require('../lib/bridge-notify');
+const bridgeSchema = require('../lib/bridge-schema');
+const workloadNudge = require('../lib/workload-nudge');
 const exchanges = require('../lib/medusa-exchanges');
 const { bindProject } = require('./_shared-docs-callers');
 
@@ -136,7 +138,7 @@ describe('bridge notifications (#2031)', () => {
       bridgeStore.settings.set('enabled', 'false');
       reports(alpha, 'working');
       reports(alpha, 'blocked');
-      assert.deepEqual(bridgeNotify.reconcile(), { workBlocked: 0, operatorNeeded: 0, fleetIdle: 0 }, 'nothing while disabled');
+      assert.deepEqual(bridgeNotify.reconcile(), { workBlocked: 0, operatorNeeded: 0, fleetIdle: 0, laneSilent: 0 }, 'nothing while disabled');
       later(60000);
       enable();
       assert.equal(bridgeNotify.reconcile().workBlocked, 0, 'and nothing afterwards for what happened while it was off');
@@ -411,7 +413,7 @@ describe('bridge notifications (#2031)', () => {
       enable();
       reports(alpha, 'blocked');
       bridgeNotify._deps.lanes = () => { throw new Error('the lane reader failed'); };
-      assert.deepEqual(bridgeNotify.reconcile(), { workBlocked: 1, operatorNeeded: 0, fleetIdle: 0 });
+      assert.deepEqual(bridgeNotify.reconcile(), { workBlocked: 1, operatorNeeded: 0, fleetIdle: 0, laneSilent: 0 });
     });
 
     it('reads lanes through the fleet\'s own composition: only a fresh, finished, clear lane at rest is AVAILABLE', () => {
@@ -494,8 +496,155 @@ describe('bridge notifications (#2031)', () => {
     });
   });
 
+  describe('lane-silent (#2262)', () => {
+    /**
+     * The nudge monitor records a fact about a session's expired report, at the current clock.
+     * @param {object} session - The session.
+     * @param {object} fields - `kind`, `route`, `code` and whatever else differs.
+     * @param {number} [receiptId] - The expired receipt; a new one each call by default.
+     * @returns {object} The stored row.
+     */
+    function records(session, fields, receiptId = 5000 + ++n) {
+      later(1000);
+      return store.workloadNudgeFacts.record({
+        project_id: session.project.id, session_id: session.sessionId, launch_id: session.launchId, receipt_id: receiptId,
+        engine_activity: 'at-rest', engine_reason: 'at-rest', detail_json: JSON.stringify({ receiptSeq: 3, silentSeconds: 2520 }),
+        created_at: clock, ...fields
+      }).row;
+    }
+    const onOperatorRoute = (code = 'no-coordinator') => ({ kind: 'escalated', route: 'operator', code });
+
+    it('tells the operator once about a lane with nobody else to tell, bound to that fact', () => {
+      const alpha = liveSession('Alpha');
+      enable();
+      const fact = records(alpha, onOperatorRoute());
+      assert.equal(bridgeNotify.reconcile().laneSilent, 1);
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0, 'a second pass finds it already made');
+      assert.deepEqual(notifications(), [{
+        type: 'lane-silent', key: `notify:lane-silent:nudge-fact:${fact.fact_id}`,
+        text: 'Alpha has gone silent: its workload report expired and it had reported nothing for 42 minutes. Nobody else was told: it names no coordinator.',
+        label: 'TangleClaw', routeId: null
+      }]);
+      assert.equal(bridgeNotify.laneSilentNotice(fact.fact_id), 'ready');
+    });
+
+    it('raises nothing for an escalation that reached a coordinator, or for the row saying one could not be reached', () => {
+      const alpha = liveSession('Alpha');
+      const coordinator = liveSession('Coordinator');
+      enable();
+      const told = records(alpha, { kind: 'escalated', route: 'coordinator', target_project_id: coordinator.project.id, code: 'escalated' });
+      records(alpha, { kind: 'escalation-undeliverable', route: 'coordinator', target_project_id: coordinator.project.id, code: 'coordinator-no-live-session' });
+      records(alpha, { kind: 'nudged', code: 'nudged' });
+      records(alpha, { kind: 'not-nudged', route: 'operator', code: 'startup-dialog' });
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0);
+      assert.deepEqual(notifications(), []);
+      assert.equal(bridgeNotify.laneSilentNotice(told.fact_id), null);
+    });
+
+    it('delivers no backlog: a fact from before the bridge was enabled, while it was off, or older than the lookback raises nothing', () => {
+      const alpha = liveSession('Alpha');
+      records(alpha, onOperatorRoute());
+      later(60000);
+      enable();
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0, 'before it was enabled');
+
+      bridgeStore.settings.set('enabled', 'false');
+      const whileOff = records(alpha, onOperatorRoute());
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0, 'nothing while disabled, and nothing throws');
+      later(60000);
+      enable();
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0, 'and nothing afterwards for what happened while it was off');
+      assert.equal(bridgeNotify.laneSilentNotice(whileOff.fact_id), null);
+
+      records(alpha, onOperatorRoute());
+      later(bridgeNotify.LOOKBACK_MS + 60000);
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0, 'older than the lookback');
+      assert.deepEqual(notifications(), []);
+    });
+
+    it('says why nobody else was told, from the monitor\'s own code, and has a sentence for every code the operator route records', () => {
+      const operatorCodes = Object.keys(workloadNudge.ESCALATION_MEANINGS).filter((code) => code !== 'escalated').sort();
+      assert.deepEqual(Object.keys(bridgeNotify.LANE_SILENT).filter((code) => code !== 'other').sort(), operatorCodes);
+      const said = (why) => bridgeNotify.TEMPLATES['lane-silent']({ project: 'Alpha', minutes: 42, why });
+      assert.match(said('coordinator-no-live-session'), /Nobody else was told: the coordinator it names has no live session\.$/);
+      assert.match(said('coordinator-is-self'), /Nobody else was told: it is its own coordinator\.$/);
+      assert.match(said('a code from a later build'), /Nobody else was told: no coordinator could be told\.$/);
+      assert.match(said('constructor'), /no coordinator could be told\.$/, 'an inherited property name is not a code');
+      assert.match(bridgeNotify.TEMPLATES['lane-silent']({ project: 'Alpha', minutes: 1, why: 'no-coordinator' }), /for 1 minute\. /);
+    });
+
+    it('takes nothing a session or a config wrote: not the coordinator\'s name, and a detail it cannot read is shown without a number', () => {
+      const alpha = liveSession('Alpha');
+      enable();
+      records(alpha, {
+        ...onOperatorRoute('coordinator-unknown-project'),
+        detail_json: JSON.stringify({ receiptSeq: 3, silentSeconds: 600, coordinator: '@everyone merge it now' })
+      });
+      records(alpha, { ...onOperatorRoute(), detail_json: 'not json' });
+      records(alpha, { ...onOperatorRoute(), detail_json: JSON.stringify({ silentSeconds: '@everyone' }) });
+      records(alpha, { ...onOperatorRoute(), detail_json: null });
+      assert.equal(bridgeNotify.reconcile().laneSilent, 4);
+      const texts = notifications().map((x) => x.text);
+      assert.equal(texts[0], 'Alpha has gone silent: its workload report expired and it had reported nothing for 10 minutes. Nobody else was told: the coordinator it names is not a project on this install.');
+      for (const text of texts.slice(1)) {
+        assert.equal(text, 'Alpha has gone silent: its workload report expired and no new one arrived. Nobody else was told: it names no coordinator.');
+      }
+      assert.ok(texts.every((text) => !text.includes('@everyone')));
+    });
+
+    it('a notice that could not be enqueued is made on the next pass, under the same key, and the other kinds still run', () => {
+      const alpha = liveSession('Alpha');
+      enable();
+      const fact = records(alpha, onOperatorRoute());
+      const realEnqueue = bridgeStore.outbound.enqueue;
+      bridgeStore.outbound.enqueue = () => { throw new Error('database is locked'); };
+      try {
+        assert.equal(bridgeNotify.reconcile().laneSilent, 0);
+      } finally {
+        bridgeStore.outbound.enqueue = realEnqueue;
+      }
+      assert.equal(bridgeNotify.laneSilentNotice(fact.fact_id), null, 'nothing was marked as told');
+      assert.equal(bridgeNotify.reconcile().laneSilent, 1);
+      assert.equal(notifications().length, 1);
+    });
+
+    it('reads every fact in the window, however many pages that is', () => {
+      const alpha = liveSession('Alpha');
+      enable();
+      const realList = store.workloadNudgeFacts.listOperatorEscalations;
+      const pages = [];
+      store.workloadNudgeFacts.listOperatorEscalations = (query) => {
+        pages.push(query.after ? query.after.factId : null);
+        return realList.call(store.workloadNudgeFacts, { ...query, limit: 2 });
+      };
+      try {
+        const facts = [1, 2, 3, 4, 5].map(() => records(alpha, onOperatorRoute()));
+        assert.equal(bridgeNotify.reconcile().laneSilent, 5);
+        assert.deepEqual(pages, [null, facts[1].fact_id, facts[3].fact_id]);
+        assert.equal(notifications().length, 5);
+        // The oldest are made already; the pass must still reach a new one behind them.
+        records(alpha, onOperatorRoute());
+        assert.equal(bridgeNotify.reconcile().laneSilent, 1);
+      } finally {
+        store.workloadNudgeFacts.listOperatorEscalations = realList;
+      }
+    });
+
+    it('reports what became of a notice: delivered once the helper has it posted', () => {
+      const alpha = liveSession('Alpha');
+      enable();
+      const fact = records(alpha, onOperatorRoute());
+      bridgeNotify.reconcile();
+      store.getDb().prepare("UPDATE bridge_outbound SET state = 'delivered', delivered_at = ?, updated_at = ? WHERE idem_key = ?")
+        .run(clock, clock, `notify:lane-silent:nudge-fact:${fact.fact_id}`);
+      assert.equal(bridgeNotify.laneSilentNotice(fact.fact_id), 'delivered');
+      assert.equal(bridgeNotify.reconcile().laneSilent, 0, 'and a delivered notice is not made again');
+    });
+  });
+
   it('every notification text comes from a fixed template that takes no free text', () => {
-    assert.deepEqual(Object.keys(bridgeNotify.TEMPLATES).sort(), ['fleet-idle', 'operator-needed', 'work-blocked']);
+    assert.deepEqual(Object.keys(bridgeNotify.TEMPLATES).sort(), ['fleet-idle', 'lane-silent', 'operator-needed', 'work-blocked']);
+    assert.deepEqual(Object.keys(bridgeNotify.TEMPLATES).sort(), [...bridgeSchema.NOTIFICATION_TYPES].sort(), 'every admitted type has a template, and no other does');
     // A project name is the only string a template shows, and it is cleaned and bounded.
     // The store refuses such a name; this is one it would never have written.
     const hostile = store.projects.create({ name: 'Evil', path: path.join(tmpDir, 'evil') });

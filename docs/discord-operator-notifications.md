@@ -123,8 +123,8 @@ Only Master validates it, consolidates it and turns it into something the gatewa
 project session posts to Discord directly.
 
 Besides those items, only three other things reach Discord: a reply to something the operator
-wrote, a delivery failure, and the typed server notifications `operator-needed`, `work-blocked`
-and `fleet-idle`.
+wrote, a delivery failure, and the typed server notifications `operator-needed`, `work-blocked`,
+`fleet-idle` and `lane-silent`.
 
 ### What carries over unchanged
 

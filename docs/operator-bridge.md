@@ -19,8 +19,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | The helper's six routes and its scoped token | Built |
 | The operator's policy routes: enable, allowlist, token, aliases, pins | Built |
 | The candidate lane: a session offers, the Master decides | Built |
-| The three typed server notifications | Built |
-| A fourth, `lane-silent` (#2262) | Admitted by the schema and given its limit; nothing raises one yet |
+| The four typed server notifications | Built. The fourth, `lane-silent` (#2262), has not yet been seen to arrive on a live install |
 | Discord helper (`bin/tc-bridge-helper`) | Built; not yet run against Discord. See [operator-bridge-helper.md](operator-bridge-helper.md) |
 | The operator's dashboard panel (global settings, Operator bridge) | Built; not yet used by a person on a live install |
 | Cutover | Not started; Rule #145 is unchanged and in force |
@@ -657,22 +656,26 @@ the operator asked for, not what any one pane was told.
 
 ## Server notifications
 
-Three typed notifications go straight to the helper's mailbox, without the Master. They are
+Four typed notifications go straight to the helper's mailbox, without the Master. They are
 transport control the server writes: each comes from a fixed template that takes only a project
-name or a count the server resolved, never anything a session or the operator typed.
+name, a count or a reason code the server resolved, never anything a session or the operator
+typed.
 
 | Type | Raised when | Bound to |
 |---|---|---|
 | `work-blocked` | a lane's workload receipt enters `blocked`. A lane that stays blocked and reports again is not a new event. | that workload receipt |
 | `operator-needed` | the Medusa watchdog raises an exchange between sessions to its operator rung. Since #2086 that includes ordinary mail left long enough. The sentence says why it was raised (unread, read and unanswered, held by configuration, stalled), from the watchdog's own reason. Never the bridge's own send to a project. | that exchange |
 | `fleet-idle` | the fleet is seen to become idle: every live lane finished and clear | the episode: when it began and which lanes were in it |
+| `lane-silent` | the workload nudge monitor escalated a lane's expired workload report and had no coordinator it could tell, so it recorded the escalation on the operator route ([fleet-workload.md](fleet-workload.md), "When the nudge goes unanswered"). An escalation that reached a coordinator raises nothing. | that record: the `workload_nudge_facts` row |
 
-A fourth type, `lane-silent`, is admitted and not yet raised (operator ruling, 2026-10-10; ADR
-0023 Decision 9 as amended). It is for a lane whose expired workload report drew no answer and
-whose escalation was recorded for the operator
-([fleet-workload.md](fleet-workload.md), "When the nudge goes unanswered"). Since schema v62 the
-queue accepts an item of this type and lets an uncollected one go after 7 days. No template
-and no pass exists for it, so no such item is ever queued: that ships as its own change.
+`lane-silent` is the fourth type (operator ruling, 2026-10-10; ADR 0023 Decision 9 as amended).
+Its sentence names the lane's project, says for how many minutes it had reported nothing when
+the escalation was recorded, and gives the reason nobody else was told, from the monitor's own
+code: the lane names no coordinator, names itself, names a project this install does not have,
+names one with no live session, or the message to its coordinator could not be sent. The
+coordinator's name is not in it, because that name is text from a project's config. It needs
+the workload nudge turned on for the lane's project, which is off by default. An uncollected
+one is let go after 7 days.
 
 - **Found, not pushed.** Nothing calls the bridge when an event happens. The gateway's pass
   reads the records that are the events and enqueues a notification for each that has none,
@@ -1120,7 +1123,7 @@ check is refused, and the message names each object that is missing or misshapen
 - `lib/bridge-handoff.js`: minting, hashing and the FIFO handoff. It does not load the store.
 - `lib/bridge-principal.js`: when a credential exists and whether a presented one is live.
 - `lib/bridge-gateway.js`: accept, resolve, dispatch, reply capture, the periodic pass.
-- `lib/bridge-notify.js`: the three typed server notifications.
+- `lib/bridge-notify.js`: the four typed server notifications.
 - `public/operator-bridge-panel.js`: the signed-in operator's panel in the dashboard's global
   settings. Operator routes only.
 - `lib/bridge-api.js`: every bridge route, declared with the principal it belongs to. One
