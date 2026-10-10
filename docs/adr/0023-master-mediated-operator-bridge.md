@@ -161,7 +161,8 @@ to the operator, and passing through the gateway or the Master session does not 
 Four kinds of item, and nothing else:
 
 1. a correlated reply;
-2. one of the three authoritative typed server notifications (Decision 9);
+2. one of the four authoritative typed server notifications (Decision 9, as amended
+   2026-10-10);
 3. a delivery failure;
 4. a Master-approved `milestone` or `operator-action-required` item, bound to its source
    receipts.
@@ -181,6 +182,27 @@ send prose to Discord.
 
 `operator-needed`, `work-blocked` and `fleet-idle`. `release-action-needed` and
 `certification-state-changed` stay reserved until an authoritative producer exists for each.
+
+**Amended (operator ruling, 2026-10-10, on #2262): a fourth type, `lane-silent`.** A lane whose
+workload report expired is nudged once, and when the nudge goes unanswered its coordinator is
+told over the switchboard (`docs/fleet-workload.md`). Where there is no coordinator to tell, or
+the message to it could not be delivered, the escalation is recorded for the operator and until
+now reached nobody. The operator ruled that this record is to reach them as a typed server
+notification, not as a candidate a session submits and not as a session's own send.
+
+- **Its authoritative producer** is the server's record of that escalation: a
+  `workload_nudge_facts` row of kind `escalated` on the `operator` route. The notification is
+  bound to that row, one per row, as `work-blocked` is bound to its workload receipt.
+- **It is transport control like the other three:** a fixed template that takes only what the
+  server resolved, never text a session or the operator typed.
+- **It keeps for 7 days,** as `work-blocked` and `operator-needed` do (Decision 20's limits):
+  a lane nobody has heard from is still so until somebody acts.
+- **Admitted before it is produced.** The types are a closed list held in three places: this
+  Decision, the CHECK on `bridge_outbound.notify_type` (schema v62) and the retention limits.
+  A test keeps the last two equal. Schema v62 admits the type; nothing raises one until the
+  producer's change ships.
+
+The two reserved types stay reserved.
 
 ### 9a. The Master routes inbound as well (operator ruling, 2026-10-05)
 
