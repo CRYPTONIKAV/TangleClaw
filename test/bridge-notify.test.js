@@ -592,7 +592,7 @@ describe('bridge notifications (#2031)', () => {
       assert.ok(texts.every((text) => !text.includes('@everyone')));
     });
 
-    it('a notice that could not be enqueued is made on the next pass, under the same key, and the other kinds still run', () => {
+    it('a notice that could not be enqueued is made on the next pass, under the same key', () => {
       const alpha = liveSession('Alpha');
       enable();
       const fact = records(alpha, onOperatorRoute());
@@ -606,6 +606,23 @@ describe('bridge notifications (#2031)', () => {
       assert.equal(bridgeNotify.laneSilentNotice(fact.fact_id), null, 'nothing was marked as told');
       assert.equal(bridgeNotify.reconcile().laneSilent, 1);
       assert.equal(notifications().length, 1);
+    });
+
+    it('a pass that cannot read the facts raises nothing for them, and the other kinds still run', () => {
+      const alpha = liveSession('Alpha');
+      enable();
+      const fact = records(alpha, onOperatorRoute());
+      reports(alpha, 'blocked');
+      const realList = store.workloadNudgeFacts.listOperatorEscalations;
+      store.workloadNudgeFacts.listOperatorEscalations = () => { throw new Error('database is locked'); };
+      try {
+        assert.deepEqual(bridgeNotify.reconcile(), { workBlocked: 1, operatorNeeded: 0, fleetIdle: 0, laneSilent: 0 });
+      } finally {
+        store.workloadNudgeFacts.listOperatorEscalations = realList;
+      }
+      assert.deepEqual(notifications().map((x) => x.type), ['work-blocked']);
+      assert.equal(bridgeNotify.reconcile().laneSilent, 1, 'and the fact is found on the next pass');
+      assert.equal(bridgeNotify.laneSilentNotice(fact.fact_id), 'ready');
     });
 
     it('reads every fact in the window, however many pages that is', () => {
