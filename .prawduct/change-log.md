@@ -35,6 +35,36 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-10 — #2262: the operator is told about a silent lane nobody else could be told about
+
+<!-- prawduct: type=feature | scope=2262-workload-nudge -->
+
+#2262 Chunk 05 of five, the last. Branch `feat/2262-lane-silent-producer`, from `origin/main` `a6ebf695`. The producer of the `lane-silent` notification the previous chunk admitted.
+
+Visual change: no
+
+**Why.** The workload nudge monitor records an escalation on the operator route when a lane's expired report drew no answer and no coordinator could be told. That row reached nobody who was not looking, and `tc sessions` said "nothing sent". The case it exists for is a coordinator cleared overnight with the operator on Discord. The Operator ruled on 2026-10-10 that the record reaches them as a typed bridge notification.
+
+**What changed.**
+- `lib/bridge-notify.js`: a `lane-silent` template and pass. The pass reads the operator-route `escalated` rows of `workload_nudge_facts` written since the bridge was enabled (or the lookback bound, whichever is later) and enqueues one notification for each that has none, under `notify:lane-silent:nudge-fact:<fact_id>`. `reconcile()` returns its count as `laneSilent`. `laneSilentNotice(factId)` reads the state of that fact's item in the outbound queue. `LANE_SILENT` holds one fixed sentence per reason code.
+- `lib/store.js`: `workloadNudgeFacts.listOperatorEscalations({since, after, limit})`, one page oldest first by `(created_at, fact_id)` with `more` and a cursor. Also one `log.info` in the v62 step for a store that had no bridge tables, which that step's review asked for.
+- `lib/workload-fleet.js`: the lane's `nudge` block gains `operatorNotice`.
+- `lib/tc-verbs.js`: the operator-route clause in `tc sessions` no longer ends "nothing sent". It reads "recorded for the operator" and then what became of the notice.
+- `lib/workload-nudge.js`: three strings and the header paragraph that said nothing reads the operator route. No behaviour.
+- Docs: `docs/fleet-workload.md`, `docs/operator-bridge.md`, `docs/configuration-reference.md` (the `workloadNudge` row), `docs/discord-operator-notifications.md`, and one sentence of ADR 0023 Decision 9's amendment, which said nothing raises the type.
+
+**Decisions.**
+- [DECISION: `tc sessions` says "notified" only for a notice the helper reported posted, and names the other states. | The wording settled at release was "recorded for the operator" from the record and "notified" when an outbound row exists. An outbound row can be waiting, set aside, or let go uncollected, and in none of those was anybody told. The block carries the item's state (`ready`, `blocked`, `delivered`, `dropped`, or null) and the line says `notice queued, not yet delivered`, `notice held, not delivered`, `notice not delivered`, `notified`, or `no notice raised`. | Stricter than the settled wording, not looser; reported to the Integrator in the PR.]
+- [DECISION: the notice does not show the coordinator's name. | The name is in the fact's detail, and it comes from a project's config file: text somebody typed. The typed notifications take only what the server resolved. The reason is given as a fixed sentence per code.]
+- [DECISION: the reader pages with a cursor and the pass reads every page. | A pass that read only the oldest N rows would stop making notices once N made ones sat ahead of a new one. The window is bounded by the 24 hour lookback, and each page by its limit.]
+- [DECISION: the minutes in the notice are those the monitor recorded with the fact. | Recomputing them at enqueue time would need the receipt and a clock, and a notice enqueued on a later pass would then disagree with the record it is bound to. The docs say what the number is.]
+
+**Tests.** `test/bridge-notify.test.js`: one fact makes one notice with its exact text and key, and a second pass none; a coordinator-route escalation, an undeliverable row, a nudge and a not-nudged row make none; nothing from before the bridge was enabled, while it was off, or older than the lookback; every reason code the monitor can record on the operator route has a sentence, and an unknown or inherited one falls back; the coordinator's name and an unreadable detail are not shown; a failed enqueue is retried under the same key; every page is read; the templates are exactly the admitted types. `test/workload-nudge-facts.test.js`: the reader's filter, order, inclusive bound, `more`, cursor across facts of one instant, and refusal of a limit it would have to cap. `test/workload-fleet.test.js`: `operatorNotice` over the HTTP route, from null to `ready` to `delivered`, and null on a coordinator-route lane. `test/tc-verbs.test.js`: each state's wording, and that only `delivered` reads "notified".
+
+**By hand, once.** The one-process check (scratch home, private tmux server, real store, real monitor timer, the real pass): result in the PR.
+
+**Not built here.** No helper or Discord delivery was exercised. `lib/medusa.js`, `lib/bridge-gateway.js`, `lib/bridge-store.js`, `lib/bridge-schema.js` and `public/` are untouched. No schema change.
+
 ## 2026-10-10 — #2262: the operator bridge admits a fourth typed notification, `lane-silent`, and nothing raises one yet
 
 <!-- prawduct: type=feature | scope=2262-workload-nudge -->

@@ -199,8 +199,9 @@ notification, not as a candidate a session submits and not as a session's own se
   a lane nobody has heard from is still so until somebody acts.
 - **Admitted before it is produced.** The types are a closed list held in three places: this
   Decision, the CHECK on `bridge_outbound.notify_type` (schema v62) and the retention limits.
-  A test keeps the last two equal. Schema v62 admits the type; nothing raises one until the
-  producer's change ships.
+  A test keeps the last two equal. Schema v62 admitted the type one change ahead of its
+  producer, the pass in `lib/bridge-notify.js` that raises one notice per operator-route
+  escalation in `workload_nudge_facts`; a test holds that every admitted type has a template.
 
 The two reserved types stay reserved.
 

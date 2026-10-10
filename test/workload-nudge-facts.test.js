@@ -264,6 +264,74 @@ describe('store.workloadNudgeFacts (#2262)', () => {
     assert.deepEqual(store.workloadNudgeFacts.listForReceipt(999), []);
   });
 
+  describe('listOperatorEscalations', () => {
+    const SINCE = '2026-10-09T11:00:00.000Z';
+    /** One operator-route escalation per receipt, at a given minute past eleven. */
+    const onOperatorRoute = (receiptId, minute, over = {}) => store.workloadNudgeFacts.record(fact({
+      receipt_id: receiptId, kind: 'escalated', route: 'operator', code: 'no-coordinator',
+      created_at: `2026-10-09T11:${String(minute).padStart(2, '0')}:00.000Z`, ...over
+    })).row;
+    let rows;
+
+    before(() => {
+      // Recorded out of time order, and two at the same instant, so the order
+      // asked for is the one read back and not the order of arrival.
+      rows = {
+        third: onOperatorRoute(7303, 30),
+        first: onOperatorRoute(7301, 10),
+        second: onOperatorRoute(7302, 30),
+        early: onOperatorRoute(7300, 0, { created_at: '2026-10-09T10:59:59.999Z' })
+      };
+      store.workloadNudgeFacts.record(fact({ receipt_id: 7301, created_at: '2026-10-09T11:05:00.000Z' }));
+      store.workloadNudgeFacts.record(fact({
+        receipt_id: 7301, kind: 'escalated', route: 'coordinator', target_project_id: 7, code: 'escalated', created_at: '2026-10-09T11:11:00.000Z'
+      }));
+      store.workloadNudgeFacts.record(fact({
+        receipt_id: 7301, kind: 'escalation-undeliverable', route: 'operator', code: 'no-coordinator', created_at: '2026-10-09T11:12:00.000Z'
+      }));
+      store.workloadNudgeFacts.record(fact({
+        receipt_id: 7301, kind: 'not-nudged', route: 'operator', code: 'startup-dialog', created_at: '2026-10-09T11:13:00.000Z'
+      }));
+    });
+
+    it('returns only escalations on the operator route since the time given, oldest first, the same instant by fact id', () => {
+      const page = store.workloadNudgeFacts.listOperatorEscalations({ since: SINCE });
+      // `third` was recorded before `second` at the same instant, so it has the lower id.
+      assert.deepEqual(page.rows.map((r) => r.fact_id), [rows.first.fact_id, rows.third.fact_id, rows.second.fact_id]);
+      assert.ok(rows.third.fact_id < rows.second.fact_id);
+      assert.equal(page.more, false);
+      assert.ok(page.rows.every((r) => r.kind === 'escalated' && r.route === 'operator'));
+      assert.equal(page.rows[0].detail_json, JSON.stringify({ silentSeconds: 1900 }), 'the whole row is returned');
+    });
+
+    it('includes a fact recorded at exactly the time given, and none before it', () => {
+      const all = store.workloadNudgeFacts.listOperatorEscalations({ since: '2026-10-09T10:59:59.999Z' });
+      assert.equal(all.rows[0].fact_id, rows.early.fact_id);
+      assert.equal(all.rows.length, 4);
+      assert.deepEqual(store.workloadNudgeFacts.listOperatorEscalations({ since: '2026-10-09T11:30:00.001Z' }), { rows: [], more: false });
+    });
+
+    it('says when a page was cut short, and reads on from the last row without repeating or missing one', () => {
+      const one = store.workloadNudgeFacts.listOperatorEscalations({ since: SINCE, limit: 2 });
+      assert.deepEqual(one.rows.map((r) => r.fact_id), [rows.first.fact_id, rows.third.fact_id]);
+      assert.equal(one.more, true);
+      const last = one.rows[one.rows.length - 1];
+      // The page ends between two facts of the same instant: the next one starts at the second.
+      const two = store.workloadNudgeFacts.listOperatorEscalations({ since: SINCE, limit: 2, after: { createdAt: last.created_at, factId: last.fact_id } });
+      assert.deepEqual(two.rows.map((r) => r.fact_id), [rows.second.fact_id]);
+      assert.equal(two.more, false);
+      const exact = store.workloadNudgeFacts.listOperatorEscalations({ since: SINCE, limit: 3 });
+      assert.equal(exact.rows.length, 3);
+      assert.equal(exact.more, false, 'a full page with nothing behind it is not cut short');
+    });
+
+    it('refuses a page size it would have to cap silently', () => {
+      for (const limit of [0, -1, 501, 1.5, '10', null]) {
+        assert.throws(() => store.workloadNudgeFacts.listOperatorEscalations({ since: SINCE, limit }), /limit must be an integer from 1 to 500/, String(limit));
+      }
+    });
+  });
+
   it('takes every kind and both routes the monitor will ever record', () => {
     for (const kind of store.WORKLOAD_NUDGE_FACT_KINDS) {
       const route = kind === 'nudged' ? null : 'operator';

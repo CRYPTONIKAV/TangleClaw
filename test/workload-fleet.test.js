@@ -318,7 +318,7 @@ describe('composed workload on the routes (ADR 0020 §6, §7, §10)', () => {
       assert.equal(l.nudge.receiptSeq, row.seq);
       assert.ok(Math.abs(l.nudge.ageSeconds - 14 * 60) <= 5, `ageSeconds ${l.nudge.ageSeconds}`);
       assert.deepEqual(Object.keys(l.nudge).sort(), ['ageSeconds', 'escalatedAgeSeconds', 'escalatedAt', 'escalatedTo',
-        'escalationRoute', 'notNudgedReason', 'nudgedAt', 'receiptSeq']);
+        'escalationRoute', 'notNudgedReason', 'nudgedAt', 'operatorNotice', 'receiptSeq']);
       assert.deepEqual([l.nudge.escalatedAt, l.nudge.escalatedAgeSeconds, l.nudge.escalatedTo, l.nudge.escalationRoute,
         l.nudge.notNudgedReason], [null, null, null, null, null], 'nudged and not escalated');
     });
@@ -370,6 +370,46 @@ describe('composed workload on the routes (ADR 0020 §6, §7, §10)', () => {
       assert.equal(l.nudge.escalationRoute, 'operator');
       assert.equal(l.nudge.escalatedTo, null);
       assert.ok(l.nudge.escalatedAt);
+      assert.equal(l.nudge.operatorNotice, null, 'the record alone is not a notice: the bridge is off');
+    });
+
+    it('says what became of the operator\'s notice once the bridge has raised one, and nothing on any other lane', async () => {
+      const bridgeStore = require('../lib/bridge-store');
+      const bridgeNotify = require('../lib/bridge-notify');
+      const project = mkProject('nudge-operator-noticed');
+      const b = bindProject(project);
+      const row = pastReceipt(b, project, Date.now() - 2 * HOUR);
+      nudgedFact(b, project, row, Date.now() - 14 * 60_000);
+      assert.equal((await lane(b.sessionId)).nudge.operatorNotice, null, 'a lane that was only nudged');
+
+      bridgeStore.settings.set('enabled', 'true');
+      bridgeStore.settings.set(bridgeNotify.ENABLED_AT, new Date(Date.now() - HOUR).toISOString());
+      try {
+        const escalated = fact(b, project, row, {
+          kind: 'escalated', route: 'operator', code: 'no-coordinator', detail_json: JSON.stringify({ receiptSeq: row.seq, silentSeconds: 7200 })
+        }, Date.now() - 4 * 60_000).row;
+        assert.equal((await lane(b.sessionId)).nudge.operatorNotice, null, 'recorded, and no pass has run yet');
+        bridgeNotify.reconcile();
+        assert.equal((await lane(b.sessionId)).nudge.operatorNotice, 'ready', 'queued for the helper, not delivered');
+        const at = new Date().toISOString();
+        store.getDb().prepare("UPDATE bridge_outbound SET state = 'delivered', delivered_at = ?, updated_at = ? WHERE idem_key = ?")
+          .run(at, at, `notify:lane-silent:nudge-fact:${escalated.fact_id}`);
+        assert.equal((await lane(b.sessionId)).nudge.operatorNotice, 'delivered');
+      } finally {
+        bridgeStore.settings.set('enabled', 'false');
+      }
+    });
+
+    it('a lane whose coordinator was told carries no operator notice', async () => {
+      const coordinator = mkProject('nudge-coordinator-4');
+      const project = mkProject('nudge-coordinator-told');
+      const b = bindProject(project);
+      const row = pastReceipt(b, project, Date.now() - 2 * HOUR);
+      nudgedFact(b, project, row, Date.now() - 14 * 60_000);
+      fact(b, project, row, { kind: 'escalated', route: 'coordinator', target_project_id: coordinator.id, code: 'escalated' }, Date.now() - 4 * 60_000);
+      const l = await lane(b.sessionId);
+      assert.equal(l.nudge.escalationRoute, 'coordinator');
+      assert.equal(l.nudge.operatorNotice, null);
     });
 
     it('goes when the session reports again, and does not return for the answered receipt', async () => {
