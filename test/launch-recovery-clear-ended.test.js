@@ -14,6 +14,9 @@
 
 const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const { setLevel } = require('../lib/logger');
 
 setLevel('error');
@@ -21,6 +24,55 @@ setLevel('error');
 const store = require('../lib/store');
 const { handleRequest } = require('../server');
 const fixture = require('./_recovery-fixture');
+
+const PUB = path.join(__dirname, '..', 'public');
+const UI_SRC = fs.readFileSync(path.join(PUB, 'ui.js'), 'utf8');
+const LANDING_SRC = fs.readFileSync(path.join(PUB, 'landing.js'), 'utf8');
+
+/**
+ * Slice a top-level function out of source text by brace-matching, so the
+ * sandbox runs the real code rather than a copy.
+ * @param {string} src - File source text
+ * @param {string} decl - Declaration to find
+ * @returns {string} The declaration plus its balanced body
+ */
+function liftFunction(src, decl) {
+  const start = src.indexOf(decl);
+  assert.notEqual(start, -1, `${decl} must exist`);
+  const bodyStart = src.indexOf('{', start);
+  let depth = 0;
+  for (let i = bodyStart; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
+  }
+  assert.fail(`${decl} body must close`);
+}
+
+/**
+ * The panel's own recovery line for one row, run from `public/ui.js` with the
+ * page's own `esc`.
+ * @param {object} row - A sequence row as `GET /api/launch-sequences` returned it
+ * @returns {string} Markup
+ */
+function panelRecoveryHtml(row) {
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(liftFunction(LANDING_SRC, 'function esc(str)'), ctx);
+  vm.runInContext(liftFunction(UI_SRC, 'function launchClearanceLabel'), ctx);
+  vm.runInContext(liftFunction(UI_SRC, 'function launchRecoveryHtml'), ctx);
+  return ctx.launchRecoveryHtml(row, null);
+}
+
+/**
+ * The launch a rendered Clear recovery button names, read the way the click
+ * handler reads it.
+ * @param {string} html - The panel's recovery markup
+ * @returns {{sessionId: number, sequenceId: number, recoveryRevision: number}|null} Null when no button was rendered
+ */
+function bindingOnButton(html) {
+  const m = /<button[^>]*data-launch-recovery-clear="(\d+)"[^>]*data-session-id="(\d+)"[^>]*data-recovery-revision="(\d+)"/.exec(html);
+  return m ? { sequenceId: Number(m[1]), sessionId: Number(m[2]), recoveryRevision: Number(m[3]) } : null;
+}
 
 describe('the recovery-clear route and an ended session (#2049)', () => {
   let env;
@@ -90,6 +142,74 @@ describe('the recovery-clear route and an ended session (#2049)', () => {
     });
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(client.json(res).recovery, 'cleared');
+  });
+
+  describe('the panel offers what the route will do (#2178)', () => {
+    /**
+     * The row the panel is given for one launch, read over HTTP.
+     * @param {object} held - The launch from the fixture
+     * @returns {Promise<object>} That launch's row from `GET /api/launch-sequences`
+     */
+    async function readRow(held) {
+      const res = await client.send('GET', `/api/launch-sequences?projectId=${held.project.id}`);
+      assert.equal(res.statusCode, 200, res.body);
+      const row = client.json(res).sequences.find((s) => s.sequenceId === held.sequence.id);
+      assert.ok(row, 'the held launch is in the listing');
+      return row;
+    }
+
+    for (const [how, end] of [
+      ['killed', (id) => store.sessions.kill(id, 'test')],
+      ['crashed', (id) => store.sessions.markCrashed(id, 'test')],
+      ['wrapped', (id) => store.sessions.wrap(id, 'test')]
+    ]) {
+      it(`a ${how} session: the panel renders no button, and the route refuses that launch as SESSION_ENDED`, async () => {
+        const held = fixture.launchInRecovery(env);
+        end(held.sequence.sessionId);
+        const row = await readRow(held);
+        assert.equal(row.sessionActive, false);
+        const html = panelRecoveryHtml(row);
+        assert.equal(bindingOnButton(html), null, 'no button is offered');
+        assert.doesNotMatch(html, /Clear recovery/);
+        assert.match(html, /Its session has ended, so there is nothing here to clear/);
+        // What the absent button would have sent: the route's answer is the
+        // reason the panel must not offer it.
+        const token = await client.pageToken();
+        const res = await client.send('POST', clearUrl(held.project), {
+          body: held.binding, headers: { 'x-tc-open-token': token }
+        });
+        assertRefusedAsEnded(res, held);
+      });
+    }
+
+    it('an active session: the panel renders the button, and the route clears the launch it names', async () => {
+      const held = fixture.launchInRecovery(env);
+      const row = await readRow(held);
+      assert.equal(row.sessionActive, true);
+      const binding = bindingOnButton(panelRecoveryHtml(row));
+      assert.deepEqual(binding, held.binding, 'the button names the held launch');
+      const token = await client.pageToken();
+      const res = await client.send('POST', clearUrl(held.project), {
+        body: binding, headers: { 'x-tc-open-token': token }
+      });
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(client.json(res).recovery, 'cleared');
+      assert.equal(bindingOnButton(panelRecoveryHtml(await readRow(held))), null, 'a cleared launch offers nothing further');
+    });
+
+    it('a session that ends after the panel was read: the stale button is refused, and the re-read drops it', async () => {
+      const held = fixture.launchInRecovery(env);
+      const binding = bindingOnButton(panelRecoveryHtml(await readRow(held)));
+      assert.ok(binding, 'the button was there while the session was active');
+      store.sessions.kill(held.sequence.sessionId, 'test');
+      const token = await client.pageToken();
+      const res = await client.send('POST', clearUrl(held.project), {
+        body: binding, headers: { 'x-tc-open-token': token }
+      });
+      assertRefusedAsEnded(res, held);
+      assert.equal(bindingOnButton(panelRecoveryHtml(await readRow(held))), null,
+        'the panel re-reads after a refusal, and this time the button is gone');
+    });
   });
 
   it('proves the operator before it says anything about the session', async () => {

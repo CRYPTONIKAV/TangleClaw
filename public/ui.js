@@ -3149,9 +3149,13 @@ function launchClearanceLabel(s) {
  * The recovery line for one launch, and the operator's control when it is theirs.
  *
  * The button appears for exactly one state: a recovery still `required` on a
- * launch in `operator` mode. An `advisory` launch clears its own by reconciling,
- * so offering a button there would offer a decision the route refuses
- * (`RECOVERY_MODE_ADVISORY`) — a control that cannot work is worse than none.
+ * launch in `operator` mode whose session has not ended. An `advisory` launch
+ * clears its own by reconciling, so offering a button there would offer a
+ * decision the route refuses (`RECOVERY_MODE_ADVISORY`) — a control that cannot
+ * work is worse than none. A launch whose session has ended is refused the same
+ * way (`SESSION_ENDED`), so its row says that in place of the button. Only the
+ * server's explicit `sessionActive: false` removes the button: a row from a
+ * server that reports no such field keeps it, and the route still decides.
  *
  * The mode named is the one this launch froze. The project's setting may have
  * changed since, and a changed setting does not reach back into a launch, so
@@ -3186,6 +3190,11 @@ function launchRecoveryHtml(s, projectMode) {
     return `<br><small class="session-rule-meta rules-status-err">Recovery required: ${verdict}.${cause}${whereToLook} `
       + 'This launch froze advisory mode, so the session clears it by attesting with a written '
       + `reconciliation — there is nothing here for you to clear.${next}</small>`;
+  }
+  if (s.sessionActive === false) {
+    return `<br><small class="session-rule-meta rules-status-err">Recovery required: ${verdict}.${cause}${whereToLook} `
+      + 'This launch froze operator-cleared mode and was never cleared. Its session has ended, so there is '
+      + 'nothing here to clear: a new session of this project has a launch of its own.</small>';
   }
   const next = projectMode === 'advisory'
     ? ' The project is advisory now; its next launch will use that, and this one still waits for a clear.'
