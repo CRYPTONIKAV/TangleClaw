@@ -2607,7 +2607,9 @@
         notes.push(`${esc(engineName)} is the engine set for the master, and ${esc(nameOf(s.resolvedEngine))} is standing in for it. A launch mode is chosen for the engine that is set, so these are the modes of ${esc(engineName)}; the stand-in will start in <code>${esc(willRun)}</code>.`);
       }
       if (view.foreign && !view.moved) {
-        notes.push(`Saved as <code>${esc(view.foreign.mode)}</code> for ${esc(nameOf(view.foreign.engine))}, which is not used on ${esc(engineName)}: the master will start in <code>${esc(willRun)}</code>. Saving this form stores the mode selected here for ${esc(engineName)} in its place.`);
+        notes.push(`Saved as <code>${esc(view.foreign.mode)}</code> for ${esc(nameOf(view.foreign.engine))}, which is not used on ${esc(engineName)}: the master will start in <code>${esc(willRun)}</code>. ${view.send
+          ? `Saving this form stores the mode selected here for ${esc(engineName)} in its place.`
+          : 'Choose a mode here to replace it.'}`);
       }
       if (view.moved && view.modes.length) {
         notes.push(`These are the launch modes of ${esc(engineName)}.`
@@ -4779,7 +4781,9 @@
    *   selected mode. `foreign` is the stored mode when it was chosen for
    *   another engine than `engineId`. `send` is true when a save must send the
    *   selection even though the operator did not touch the control; a control
-   *   they changed is always sent.
+   *   they changed is always sent. Without a pin, `engineId`, `standIn` and
+   *   `foreign` are the page's reading and can be wrong, which is why nothing
+   *   is sent on the strength of them.
    */
   function tcMasterLaunchModeView(settings, engines, pin, defaultEngine) {
     const s = settings || {};
@@ -4811,14 +4815,23 @@
     return {
       engineId, moved, standIn, modes, selected, stranded, foreign,
       // Untouched, the control is sent in one case only: beside a stored mode
-      // that belongs to another engine than the one set. The server's notice
+      // that belongs to another engine than the PINNED one. The server's notice
       // for that case asks for `default` to be saved first, and a control that
-      // already shows `default` would never send it. After an engine move it
-      // is NOT sent untouched: an omitted mode is how the server knows none
-      // was chosen for the new engine, and only then does it report the reset.
-      // Sending the `default` on show would turn a reset the operator must be
-      // told about into a choice they never made.
-      send: !moved && Boolean(foreign)
+      // already shows `default` would never send it.
+      //
+      // Only with a pin, because only the pin is the server's own word for
+      // which engine is set. Without one the engine above is this page's
+      // reading, from a copy of the config that can be stale or absent or from
+      // an engine that may be standing in, and a wrong reading would call a
+      // mode foreign that is validly stored and send `default` over it.
+      //
+      // And only while the dropdown still shows that pin. Once it holds
+      // anything else the control is not sent untouched: an omitted mode is
+      // how the server knows none was chosen for the new engine, and only then
+      // does it report a reset, or keep a mode already recorded for the engine
+      // being switched to. That holds for a dropdown emptied onto a default
+      // engine the page believes is the same one, too: the belief can be wrong.
+      send: Boolean(storedPin) && pin === storedPin && Boolean(foreign)
     };
   }
 

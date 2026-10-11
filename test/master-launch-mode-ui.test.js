@@ -256,13 +256,16 @@ describe('#2197 — the Master settings modal and an engine change', () => {
    * reports what the rule stored.
    *
    * @param {object} stored - `engine`, `launchMode`, `launchModeEngine` as stored.
-   * @param {object} [options] - As `openForm`.
+   * @param {object} [options] - As `openForm`, and `settings`: the status the
+   *   modal opens on, when it is not simply the stored block on its own engine.
    * @returns {object} The form, with `outcomes`: the rule's answer to each save.
    */
   function serverForm(stored, options = {}) {
     let config = { defaultEngine: 'claude', master: { accessLevel: 'read-only', scope: 'all', autoStart: false, ...stored } };
     const outcomes = [];
-    const form = openForm(settingsOn(stored.engine, stored.launchMode, { launchModeEngine: stored.launchModeEngine }), {
+    const opened = options.settings
+      || settingsOn(stored.engine, stored.launchMode, { launchModeEngine: stored.launchModeEngine });
+    const form = openForm(opened, {
       ...options,
       patch(body, live) {
         const after_ = { ...config, master: { ...config.master, engine: body.master.engine } };
@@ -270,9 +273,10 @@ describe('#2197 — the Master settings modal and an engine change', () => {
         outcomes.push(outcome);
         if (outcome.error) return null;
         config = { ...after_, master: { ...after_.master, launchMode: outcome.launchMode, launchModeEngine: outcome.launchModeEngine } };
-        const engine = config.master.engine;
+        const engine = config.master.engine || config.defaultEngine;
         const runs = outcome.launchModeEngine === engine || outcome.launchMode === 'default';
         live.status = settingsOn(engine, outcome.launchMode, {
+          engine: config.master.engine,
           launchModeEngine: outcome.launchModeEngine, resolvedLaunchMode: runs ? outcome.launchMode : 'default'
         });
         return {
@@ -412,6 +416,33 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       assert.equal(there.selected, 'bypassPermissions');
       assert.equal(there.foreign, null);
       assert.equal(there.send, false, 'the server keeps a mode recorded for the engine switched to');
+    });
+
+    it('sends nothing untouched on its own reading of which engine is set: only a pin is the server\'s word', () => {
+      // No pin. The mode is validly stored for the default engine, Claude Code,
+      // and Codex is standing in. A page with no config reads Codex as the
+      // engine set, and so reads the mode as foreign. It may show that; it
+      // must not send Interactive over the mode on the strength of it.
+      const standIn = settingsOn('codex', 'bypassPermissions', {
+        engine: null, launchModeEngine: 'claude', resolvedLaunchMode: 'default'
+      });
+      const blind = view(standIn, '', null);
+      assert.deepEqual(JSON.parse(JSON.stringify(blind.foreign)), { mode: 'bypassPermissions', engine: 'claude' });
+      assert.equal(blind.send, false);
+      // A page whose copy of the config is stale: the default engine became
+      // Codex elsewhere and Full Auto was chosen for it.
+      const stale = view(settingsOn('codex', 'fullAuto', { engine: null }), '', 'claude');
+      assert.equal(stale.send, false);
+      // With a pin the reading is exact, and the selection is sent.
+      const pinned = settingsOn('codex', 'bypassPermissions', { launchModeEngine: 'claude' });
+      assert.equal(view(pinned, 'codex').send, true);
+      // But not once the pin is removed onto a default engine the page takes
+      // for the same one. If the page is wrong about the default, the server
+      // sees an engine change, and an omitted mode lets it keep a mode
+      // recorded for that engine where a sent Interactive would replace it.
+      const unpinned = view(pinned, '', 'codex');
+      assert.equal(unpinned.moved, false, 'the page reads no change of engine');
+      assert.equal(unpinned.send, false, 'and still sends nothing on that reading');
     });
 
     it('lists the modes of the engine that is set while another stands in for it', () => {
@@ -701,6 +732,30 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       assert.equal(outcome.launchMode, 'default');
       assert.equal(outcome.unused, null, 'so the notice that asks for exactly this is not drawn again');
       assert.doesNotMatch(form.group(), /which is not used on Codex/, 'and the form no longer says a foreign mode is saved');
+    });
+
+    it('an untouched save does not clear a mode stored for the default engine while the page cannot tell which engine that is', async () => {
+      const stored = { engine: null, launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
+      const standIn = settingsOn('codex', 'bypassPermissions', {
+        engine: null, launchModeEngine: 'claude', resolvedLaunchMode: 'default'
+      });
+      for (const config of [null, { defaultEngine: 'codex' }]) {
+        const form = serverForm(stored, { settings: standIn, config });
+        await form.open();
+        const patch = await form.save();
+        assert.ok(!('launchMode' in patch), `no mode sent with the page's config ${JSON.stringify(config)}`);
+        assert.equal(form.outcomes[0].launchMode, 'bypassPermissions', 'the mode is still stored');
+        assert.equal(form.outcomes[0].launchModeEngine, 'claude');
+      }
+    });
+
+    it('where it only reads a mode as foreign, it says to choose one and does not say a save replaces it', async () => {
+      const form = openForm(settingsOn('codex', 'bypassPermissions', {
+        engine: null, launchModeEngine: 'claude', resolvedLaunchMode: 'default'
+      }), { config: null });
+      await form.open();
+      assert.match(form.group(), /Choose a mode here to replace it\./);
+      assert.doesNotMatch(form.group(), /Saving this form stores/);
     });
 
     it('a mode chosen and saved survives the next save about something else', async () => {
