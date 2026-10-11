@@ -2612,7 +2612,7 @@
       if (view.moved && view.modes.length) {
         notes.push(`These are the launch modes of ${esc(engineName)}.`
           + (view.foreign
-            ? ` <code>${esc(view.foreign.mode)}</code> was chosen for ${esc(nameOf(view.foreign.engine))} and does not carry to another engine: saving stores the mode selected here.`
+            ? ` <code>${esc(view.foreign.mode)}</code> was chosen for ${esc(nameOf(view.foreign.engine))} and does not carry to another engine: saving resets it unless you choose a mode here.`
             : ''));
       }
       if (!view.moved && s.accessLevel === 'write' && s.resolvedLaunchMode === 'bypassPermissions') {
@@ -2648,15 +2648,29 @@
      * from it, with what the save answered. Without the read the form would go
      * on comparing the engine dropdown with the settings it opened with, and
      * moving the dropdown back would show a mode the save had just reset.
+     * When the read fails the control is withdrawn rather than left stale.
      * @param {string[]} warnings - The save's `warnings`.
      */
     async function adoptSavedMasterSettings(warnings) {
       const status = await api('/api/master/status');
-      const read = Boolean(status && status.settings);
-      if (read) shown = status.settings;
-      renderMasterLaunchMode(read ? warnings : warnings.concat(
-        'The saved settings could not be read back, so the launch mode shown here may be out of date. Close Master settings and open it again before changing the launch mode.'
-      ));
+      if (status && status.settings) {
+        shown = status.settings;
+        renderMasterLaunchMode(warnings);
+        return;
+      }
+      // Unread, what is stored is unknown, and a control drawn from the
+      // settings the form opened with could send a mode nobody chose on the
+      // next save. So no control is drawn: with nothing to read, a save sends
+      // no launch mode and the server keeps or resets it by its own rule.
+      shown = null;
+      const group = document.getElementById('masterLaunchModeGroup');
+      if (!group) return;
+      const notices = warnings.concat(
+        'The saved settings could not be read back, so the launch mode cannot be shown or changed here. Close Master settings and open it again.'
+      );
+      group.innerHTML = `
+      <div class="form-label">Launch mode</div>
+      ${notices.map((n) => `<div class="form-hint"><strong>${esc(n)}</strong></div>`).join('')}`;
     }
 
     /**
@@ -2996,11 +3010,12 @@
       const masterPatch = {
         accessLevel: checked ? checked.value : 'read-only',
         engine: engineSel && engineSel.value ? engineSel.value : null,
-        // Sent only when it is a choice. The control marks itself: from the
-        // start when it was drawn for another engine than the stored one, where
-        // an omitted mode tells the server none was chosen, and otherwise once
-        // the operator changes it. Absent select → there were no modes to list,
-        // so nothing is sent rather than a guess.
+        // Sent only when it is a choice. The control marks itself once the
+        // operator changes it. Left alone it is omitted, which after an engine
+        // change is what tells the server no mode was chosen for the new
+        // engine: the server then resets it and says so in `warnings`. Absent
+        // select → there were no modes to list, so nothing is sent rather than
+        // a guess.
         ...(modeSel && modeSel.value && modeSel.dataset.send === '1' ? { launchMode: modeSel.value } : {}),
         scope: scopeSel && scopeSel.value ? { type: 'group', groupId: scopeSel.value } : 'all',
         autoStart: !!(autoStartEl && autoStartEl.checked)
@@ -4763,7 +4778,8 @@
    *   start. `stranded` is true when the stored engine no longer offers the
    *   selected mode. `foreign` is the stored mode when it was chosen for
    *   another engine than `engineId`. `send` is true when a save must send the
-   *   selection even though the operator did not touch the control.
+   *   selection even though the operator did not touch the control; a control
+   *   they changed is always sent.
    */
   function tcMasterLaunchModeView(settings, engines, pin, defaultEngine) {
     const s = settings || {};
@@ -4794,12 +4810,15 @@
     const selected = held && !foreign && (stranded || offers(held)) ? held : 'default';
     return {
       engineId, moved, standIn, modes, selected, stranded, foreign,
-      // A mode drawn for another engine is a choice for that engine, sent even
-      // untouched. So is the selection beside a stored mode that belongs to
-      // another engine: the server's notice for that case asks for `default`
-      // to be saved first, and a control that already shows `default` would
-      // never send it.
-      send: moved || Boolean(foreign)
+      // Untouched, the control is sent in one case only: beside a stored mode
+      // that belongs to another engine than the one set. The server's notice
+      // for that case asks for `default` to be saved first, and a control that
+      // already shows `default` would never send it. After an engine move it
+      // is NOT sent untouched: an omitted mode is how the server knows none
+      // was chosen for the new engine, and only then does it report the reset.
+      // Sending the `default` on show would turn a reset the operator must be
+      // told about into a choice they never made.
+      send: !moved && Boolean(foreign)
     };
   }
 

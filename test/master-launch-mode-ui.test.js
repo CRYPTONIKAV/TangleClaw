@@ -228,8 +228,66 @@ function openForm(settings, options = {}) {
 }
 
 describe('#2197 — the Master settings modal and an engine change', () => {
+  const store = require('../lib/store');
+  const master = require('../lib/master');
+  const { setLevel } = require('../lib/logger');
   let helpers;
-  before(() => { helpers = loadHelper(); });
+  let tmpDir;
+
+  // The server's rule words its notices from the engine profiles, so the cases
+  // that answer a save as the server does need a store holding the bundled ones.
+  before(() => {
+    helpers = loadHelper();
+    setLevel('error');
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-2197-ui-'));
+    store._setBasePath(tmpDir);
+    store.init();
+  });
+  after(() => {
+    store.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /**
+   * A form opened on a stored Master block, whose saves are answered by the
+   * server's own rule: `masterLaunchModeAfterPatch` decides what is stored and
+   * the two notice functions word `warnings`, as `PATCH /api/config` does. A
+   * mode the rule refuses fails the save. The status read after a save
+   * reports what the rule stored.
+   *
+   * @param {object} stored - `engine`, `launchMode`, `launchModeEngine` as stored.
+   * @param {object} [options] - As `openForm`.
+   * @returns {object} The form, with `outcomes`: the rule's answer to each save.
+   */
+  function serverForm(stored, options = {}) {
+    let config = { defaultEngine: 'claude', master: { accessLevel: 'read-only', scope: 'all', autoStart: false, ...stored } };
+    const outcomes = [];
+    const form = openForm(settingsOn(stored.engine, stored.launchMode, { launchModeEngine: stored.launchModeEngine }), {
+      ...options,
+      patch(body, live) {
+        const after_ = { ...config, master: { ...config.master, engine: body.master.engine } };
+        const outcome = master.masterLaunchModeAfterPatch(config, after_, body.master);
+        outcomes.push(outcome);
+        if (outcome.error) return null;
+        config = { ...after_, master: { ...after_.master, launchMode: outcome.launchMode, launchModeEngine: outcome.launchModeEngine } };
+        const engine = config.master.engine;
+        const runs = outcome.launchModeEngine === engine || outcome.launchMode === 'default';
+        live.status = settingsOn(engine, outcome.launchMode, {
+          launchModeEngine: outcome.launchModeEngine, resolvedLaunchMode: runs ? outcome.launchMode : 'default'
+        });
+        return {
+          ok: true,
+          warnings: []
+            .concat(outcome.reset ? [master.masterLaunchModeResetWarning(outcome.reset)] : [])
+            .concat(outcome.unused ? [master.masterLaunchModeUnusedWarning(outcome.unused)] : [])
+        };
+      }
+    });
+    form.outcomes = outcomes;
+    return form;
+  }
+
+  const BYPASS_ON_CLAUDE = { engine: 'claude', launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
 
   /**
    * The view for a stored engine and mode once the dropdown names `pin`.
@@ -293,7 +351,7 @@ describe('#2197 — the Master settings modal and an engine change', () => {
             assert.equal(v.engineId, to);
             assert.equal(v.selected, 'default', `${from}/${mode} shown on ${to}`);
             assert.deepEqual(ids(v.modes), ids(offeredBy(to)), `${to}'s own list`);
-            assert.equal(v.send, true, 'a mode drawn for a new engine is a choice for it and is always sent');
+            assert.equal(v.send, false, 'left alone it is omitted, so the server resets the mode and says so');
             assert.equal(v.stranded, false);
           }
         }
@@ -353,7 +411,7 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       const there = view(s, 'codex');
       assert.equal(there.selected, 'bypassPermissions');
       assert.equal(there.foreign, null);
-      assert.equal(there.send, true);
+      assert.equal(there.send, false, 'the server keeps a mode recorded for the engine switched to');
     });
 
     it('lists the modes of the engine that is set while another stands in for it', () => {
@@ -498,13 +556,16 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       assert.equal((await form.save()).launchMode, 'plan');
     });
 
-    it('sends default with an engine change the operator left the mode alone on', async () => {
+    it('sends no launch mode with an engine change the operator left the mode alone on', async () => {
+      // Omitting it is what tells the server no mode was chosen for the new
+      // engine. Sending the Interactive the control shows would make the reset
+      // a choice, and the server would have nothing to report.
       const form = openForm(settingsOn('claude', 'bypassPermissions'));
       await form.open();
       form.moveEngine('codex');
       const patch = await form.save();
       assert.equal(patch.engine, 'codex');
-      assert.equal(patch.launchMode, 'default', 'never the old engine\'s mode');
+      assert.ok(!('launchMode' in patch), 'neither the old engine\'s mode nor a default nobody chose');
     });
 
     it('sends the mode picked for the new engine, even when its key equals the stored one', async () => {
@@ -515,6 +576,15 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       const patch = await form.save();
       assert.equal(patch.engine, 'codex');
       assert.equal(patch.launchMode, 'bypassPermissions');
+    });
+
+    it('sends Interactive for the new engine when the operator picked it there', async () => {
+      const form = openForm(settingsOn('claude', 'bypassPermissions'));
+      await form.open();
+      form.moveEngine('codex');
+      form.pickMode('fullAuto');
+      form.pickMode('default');
+      assert.equal((await form.save()).launchMode, 'default');
     });
 
     it('sends no launch mode when the engine was moved and moved back', async () => {
@@ -546,42 +616,27 @@ describe('#2197 — the Master settings modal and an engine change', () => {
     });
   });
 
-  describe('what a save shows', () => {
-    const RESET = 'The Master\'s launch mode is reset to Interactive. Bypass was chosen for Claude Code and does not carry to Codex. Choose a launch mode for Codex if you want one.';
-
-    /**
-     * A `PATCH /api/config` that applies the engine change and answers a reset.
-     * @param {object} body - The request body
-     * @param {object} live - The form's server state
-     * @returns {object}
-     */
-    function resetting(body, live) {
-      live.status = settingsOn(body.master.engine, 'default');
-      return { ok: true, warnings: [RESET] };
-    }
-
-    it('shows a returned warning under Launch mode, where it stays, and points at it from the status line', async () => {
-      const form = openForm(settingsOn('claude', 'bypassPermissions'), { patch: resetting });
+  describe('a save, answered by the server\'s own rule', () => {
+    it('an engine change with the mode left alone is reset by the server, and the modal shows its notice where it stays', async () => {
+      const form = serverForm(BYPASS_ON_CLAUDE);
       await form.open();
       form.moveEngine('codex');
       await form.save();
-      assert.match(form.group(), /<div class="form-hint"><strong>The Master's launch mode is reset to Interactive\./);
-      assert.match(form.group(), /does not carry to Codex/);
+
+      const [outcome] = form.outcomes;
+      assert.equal(outcome.error, null);
+      assert.equal(outcome.launchMode, 'default');
+      assert.deepEqual(outcome.reset, { mode: 'bypassPermissions', fromEngine: 'claude', toEngine: 'codex' },
+        'the server saw a reset, not a choice');
+      assert.match(form.group(),
+        /<div class="form-hint"><strong>The Master's launch mode is reset to Interactive\. Bypass was chosen for Claude Code and does not carry to Codex\./);
       assert.match(form.statusLine().textContent, /Settings saved, with a notice under Launch mode/);
       assert.match(form.statusLine().textContent, /launch mode and scope apply on next master start/);
       assert.match(form.statusLine().className, /rules-status-ok/);
     });
 
-    it('says only that the settings were saved when the save answered no warning', async () => {
-      const form = openForm(settingsOn('claude', 'default'));
-      await form.open();
-      await form.save();
-      assert.equal(form.statusLine().textContent, 'Settings saved — engine, launch mode and scope apply on next master start');
-      assert.doesNotMatch(form.group(), /<div class="form-hint"><strong>/, 'no notice is drawn');
-    });
-
     it('reads the stored settings back, so moving the engine back does not show the mode the save reset', async () => {
-      const form = openForm(settingsOn('claude', 'bypassPermissions'), { patch: resetting });
+      const form = serverForm(BYPASS_ON_CLAUDE);
       await form.open();
       form.moveEngine('codex');
       await form.save();
@@ -591,19 +646,105 @@ describe('#2197 — the Master settings modal and an engine change', () => {
 
       form.moveEngine('claude');
       assert.equal(form.mode().value, 'default', 'Bypass was reset: it is no longer stored for Claude Code');
-      const patch = await form.save();
-      assert.equal(patch.engine, 'claude');
-      assert.equal(patch.launchMode, 'default');
+      await form.save();
+      assert.equal(form.outcomes[1].launchMode, 'default');
+      assert.equal(form.outcomes[1].reset, null, 'and there is nothing left to reset or report');
     });
 
-    it('says the form may be out of date when the settings cannot be read back', async () => {
-      const form = openForm(settingsOn('claude', 'bypassPermissions'), { patch: resetting });
+    it('an engine change with a mode picked stores that mode for the new engine, with no notice', async () => {
+      const form = serverForm(BYPASS_ON_CLAUDE);
+      await form.open();
+      form.moveEngine('codex');
+      form.pickMode('fullAuto');
+      await form.save();
+      const [outcome] = form.outcomes;
+      assert.equal(outcome.error, null);
+      assert.equal(outcome.launchMode, 'fullAuto');
+      assert.equal(outcome.launchModeEngine, 'codex');
+      assert.equal(outcome.reset, null);
+      assert.equal(form.statusLine().textContent, 'Settings saved — engine, launch mode and scope apply on next master start');
+      assert.doesNotMatch(form.group(), /<div class="form-hint"><strong>/, 'no notice is drawn');
+      assert.equal(form.mode().value, 'fullAuto', 'and the control shows what is stored now');
+    });
+
+    it('a save about something else leaves the mode alone and draws no notice', async () => {
+      const form = serverForm(BYPASS_ON_CLAUDE);
+      await form.open();
+      await form.save();
+      const [outcome] = form.outcomes;
+      assert.equal(outcome.launchMode, 'bypassPermissions');
+      assert.equal(outcome.launchModeEngine, 'claude');
+      assert.equal(outcome.reset, null);
+      assert.equal(outcome.unused, null);
+      assert.doesNotMatch(form.group(), /<div class="form-hint"><strong>/);
+    });
+
+    it('is never refused for sending the old engine\'s mode to an engine that does not define it', async () => {
+      // Before this, Accept Edits on Claude Code moved to Aider was a 400: the
+      // modal sent `acceptEdits` with the new engine.
+      const form = serverForm({ engine: 'claude', launchMode: 'acceptEdits', launchModeEngine: 'claude' });
+      await form.open();
+      form.moveEngine('aider');
+      await form.save();
+      assert.equal(form.outcomes[0].error, null);
+      assert.equal(form.outcomes[0].launchMode, 'default');
+      assert.match(form.group(), /Accept Edits was chosen for Claude Code and does not carry to Aider/);
+    });
+
+    it('a stored mode that belongs to another engine is cleared by saving the form as shown', async () => {
+      const form = serverForm({ engine: 'codex', launchMode: 'bypassPermissions', launchModeEngine: 'claude' });
+      await form.open();
+      await form.save();
+      const [outcome] = form.outcomes;
+      assert.equal(outcome.error, null);
+      assert.equal(outcome.launchMode, 'default');
+      assert.equal(outcome.unused, null, 'so the notice that asks for exactly this is not drawn again');
+      assert.doesNotMatch(form.group(), /which is not used on Codex/, 'and the form no longer says a foreign mode is saved');
+    });
+
+    it('a mode chosen and saved survives the next save about something else', async () => {
+      const form = serverForm(BYPASS_ON_CLAUDE);
+      await form.open();
+      form.moveEngine('codex');
+      form.pickMode('fullAuto');
+      await form.save();
+      await form.save();
+      assert.equal(form.outcomes[1].launchMode, 'fullAuto');
+      assert.equal(form.outcomes[1].launchModeEngine, 'codex');
+    });
+  });
+
+  describe('a save whose result cannot be read back, or that fails', () => {
+    it('withdraws the control when the settings cannot be read back, and still shows the save\'s own answer', async () => {
+      const form = serverForm(BYPASS_ON_CLAUDE);
       await form.open();
       form.moveEngine('codex');
       form.live.statusFails = true;
       await form.save();
       assert.match(form.group(), /could not be read back/);
-      assert.match(form.group(), /does not carry to Codex/, 'the save\'s own answer is still shown');
+      assert.match(form.group(), /does not carry to Codex/, 'the reset the save reported is still shown');
+      assert.equal(form.mode(), null, 'no control is drawn from settings that may be out of date');
+    });
+
+    it('does not reset a mode just chosen on the next save after a failed read-back', async () => {
+      // The form still holds the settings it opened with. Drawn from those, the
+      // control would show Interactive for an engine it thinks is new, and a
+      // save about something else would store that over the mode just chosen.
+      const form = serverForm(BYPASS_ON_CLAUDE);
+      await form.open();
+      form.moveEngine('codex');
+      form.pickMode('fullAuto');
+      form.live.statusFails = true;
+      await form.save();
+      assert.equal(form.outcomes[0].launchMode, 'fullAuto');
+
+      const patch = await form.save();
+      assert.ok(!('launchMode' in patch), 'with no control, the save sends no launch mode');
+      assert.equal(form.outcomes[1].launchMode, 'fullAuto', 'so the chosen mode is still stored');
+      assert.equal(form.outcomes[1].launchModeEngine, 'codex');
+
+      form.moveEngine('claude');
+      assert.equal(form.mode(), null, 'and moving the engine does not bring a stale control back');
     });
 
     it('shows no reset and reads nothing back when the save failed', async () => {
@@ -626,86 +767,6 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       await form.open();
       await form.save();
       assert.match(form.statusLine().textContent, /^Settings saved — /);
-    });
-  });
-
-  describe('the modal\'s save, through the server\'s rule', () => {
-    const store = require('../lib/store');
-    const master = require('../lib/master');
-    const { setLevel } = require('../lib/logger');
-    let tmpDir;
-
-    before(() => {
-      setLevel('error');
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-2197-ui-'));
-      store._setBasePath(tmpDir);
-      store.init();
-    });
-    after(() => {
-      store.close();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    });
-
-    /**
-     * What the server would hold after the modal's save, by its own rule.
-     * @param {object} stored - The stored `master` launch fields: `engine`, `launchMode`, `launchModeEngine`.
-     * @param {Function} act - Drives the opened form before the save.
-     * @returns {Promise<object>} `masterLaunchModeAfterPatch`'s answer.
-     */
-    async function outcome(stored, act) {
-      const before_ = { defaultEngine: 'claude', master: { accessLevel: 'read-only', scope: 'all', autoStart: false, ...stored } };
-      const form = openForm(settingsOn(stored.engine, stored.launchMode, { launchModeEngine: stored.launchModeEngine }));
-      await form.open();
-      act(form);
-      const patch = await form.save();
-      const after_ = { ...before_, master: { ...before_.master, engine: patch.engine } };
-      return master.masterLaunchModeAfterPatch(before_, after_, patch);
-    }
-
-    const BYPASS_ON_CLAUDE = { engine: 'claude', launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
-
-    it('an engine change with the mode left alone stores default for the new engine', async () => {
-      const result = await outcome(BYPASS_ON_CLAUDE, (form) => form.moveEngine('codex'));
-      assert.equal(result.error, null);
-      assert.equal(result.launchMode, 'default');
-      assert.equal(result.launchModeEngine, null);
-    });
-
-    it('an engine change with a mode picked stores that mode for the new engine', async () => {
-      const result = await outcome(BYPASS_ON_CLAUDE, (form) => { form.moveEngine('codex'); form.pickMode('fullAuto'); });
-      assert.equal(result.error, null);
-      assert.equal(result.launchMode, 'fullAuto');
-      assert.equal(result.launchModeEngine, 'codex');
-      assert.equal(result.reset, null);
-    });
-
-    it('a save about something else leaves the mode alone and draws no notice', async () => {
-      const result = await outcome(BYPASS_ON_CLAUDE, () => {});
-      assert.equal(result.launchMode, 'bypassPermissions');
-      assert.equal(result.launchModeEngine, 'claude');
-      assert.equal(result.reset, null);
-      assert.equal(result.unused, null);
-    });
-
-    it('is never refused for sending the old engine\'s mode to an engine that does not define it', async () => {
-      // Before this, Accept Edits on Claude Code moved to Aider was a 400: the
-      // modal sent `acceptEdits` with the new engine.
-      const result = await outcome(
-        { engine: 'claude', launchMode: 'acceptEdits', launchModeEngine: 'claude' },
-        (form) => form.moveEngine('aider')
-      );
-      assert.equal(result.error, null);
-      assert.equal(result.launchMode, 'default');
-    });
-
-    it('a stored mode that belongs to another engine is cleared by saving the form as shown', async () => {
-      const result = await outcome(
-        { engine: 'codex', launchMode: 'bypassPermissions', launchModeEngine: 'claude' },
-        () => {}
-      );
-      assert.equal(result.error, null);
-      assert.equal(result.launchMode, 'default');
-      assert.equal(result.unused, null, 'so the notice that asks for exactly this is not drawn again');
     });
   });
 });
