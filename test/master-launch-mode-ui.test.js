@@ -626,6 +626,7 @@ describe('#2197 — the Master settings modal and an engine change', () => {
       const [outcome] = form.outcomes;
       assert.equal(outcome.error, null);
       assert.equal(outcome.launchMode, 'default');
+      assert.equal(outcome.launchModeEngine, null, 'default belongs to no engine');
       assert.deepEqual(outcome.reset, { mode: 'bypassPermissions', fromEngine: 'claude', toEngine: 'codex' },
         'the server saw a reset, not a choice');
       assert.match(form.group(),
