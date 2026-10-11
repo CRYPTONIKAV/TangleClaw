@@ -895,7 +895,11 @@ describe('API endpoints', () => {
         // #756 added launchMode to the normalized shape. It is stored on every
         // write, not only when patched, so the block never carries a missing
         // field for `_buildLaunchCommand` to receive as undefined.
-        accessLevel: 'read-only', engine: null, launchMode: 'default', scope: 'all', autoStart: true,
+        accessLevel: 'read-only', engine: null, launchMode: 'default',
+        // #2197 added the engine a mode was chosen for, stored on every write
+        // for the same reason. `null` beside `default`, which belongs to no engine.
+        launchModeEngine: null,
+        scope: 'all', autoStart: true,
         // #996 added the two switchboard opt-ins, stored on every write for the
         // same reason — a Master block must never carry a missing field.
         medusaEnabled: false, medusaWake: false
@@ -937,17 +941,19 @@ describe('API endpoints', () => {
       assert.equal(store.config.load().master.launchMode, 'acceptEdits');
     });
 
-    it('accepts a mode the CURRENT engine cannot honor, and keeps it stored', async () => {
-      // Deliberate: validation is by name, not against whichever engine happens
-      // to be resolved at the moment of the PATCH. The operator may switch
-      // engines back, and `_masterRuntime` reconciles at launch. Rejecting here
-      // would make the setting's validity depend on unrelated state.
-      const { status } = await request(server, 'PATCH', '/api/config', {
+    it('refuses a mode chosen in the same save as an engine that does not define it (#2197)', async () => {
+      // Reversed by #2197. This case used to assert the opposite: the save was
+      // accepted and `acceptEdits` stayed stored for Aider, so that switching
+      // back would restore it (#756). A launch mode is now a choice about one
+      // engine, and a mode named beside a new engine is a choice for that
+      // engine, which Aider cannot be given.
+      const before = store.config.load().master;
+      const { status, data } = await request(server, 'PATCH', '/api/config', {
         master: { engine: 'aider', launchMode: 'acceptEdits' }
       });
-      assert.equal(status, 200);
-      assert.equal(store.config.load().master.launchMode, 'acceptEdits',
-        'the stored preference survives an engine that cannot honor it');
+      assert.equal(status, 400);
+      assert.match(data.error, /"acceptEdits" is not a launch mode of Aider/);
+      assert.deepEqual(store.config.load().master, before, 'a refused save stores nothing');
     });
 
     it('rejects a launch mode no engine defines, naming the valid set', async () => {
@@ -975,6 +981,211 @@ describe('API endpoints', () => {
     it('rejects a non-string launch mode', async () => {
       const { status } = await request(server, 'PATCH', '/api/config', { master: { launchMode: 7 } });
       assert.equal(status, 400);
+    });
+
+    // #2197 — the mode a save leaves the Master with, over the real route. The
+    // rule itself is exercised case by case in `test/master-launch-mode.test.js`;
+    // these hold what only the route can show: the stored block, the response's
+    // `warnings`, and a request that carries the engine in either of its fields.
+    describe('an engine change does not carry the Master\'s launch mode (#2197)', () => {
+      let savedConfig;
+
+      /**
+       * Store a Master block and default engine directly, as the starting
+       * point of a case. Not through the route: the route is what is under test.
+       * @param {object} masterBlock - Fields over a read-only, unpinned Master.
+       * @param {string} [defaultEngine] - The install's default engine.
+       */
+      function given(masterBlock, defaultEngine = 'claude') {
+        const config = store.config.load();
+        config.defaultEngine = defaultEngine;
+        config.master = {
+          accessLevel: 'read-only', engine: null, launchMode: 'default', scope: 'all', autoStart: false,
+          medusaEnabled: false, medusaWake: false, ...masterBlock
+        };
+        store.config.save(config);
+      }
+
+      beforeEach(() => { savedConfig = store.config.load(); });
+      afterEach(() => { store.config.save(savedConfig); });
+
+      const BYPASS_ON_CLAUDE = { engine: 'claude', launchMode: 'bypassPermissions', launchModeEngine: 'claude' };
+
+      it('resets the mode to default and says so, naming both engines and both modes', async () => {
+        given(BYPASS_ON_CLAUDE);
+        const { status, data } = await request(server, 'PATCH', '/api/config', { master: { engine: 'codex' } });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.engine, 'codex');
+        assert.equal(stored.launchMode, 'default', 'Bypass was chosen for Claude Code and must not start Codex');
+        assert.equal(stored.launchModeEngine, null);
+        assert.equal(data.warnings.length, 1);
+        assert.match(data.warnings[0], /reset to Interactive/);
+        assert.match(data.warnings[0], /Bypass was chosen for Claude Code/);
+        assert.match(data.warnings[0], /does not carry to Codex/);
+        assert.equal(data.config.master.launchMode, 'default', 'the response\'s config is what was stored');
+      });
+
+      it('keeps a mode the same save chooses for the new engine, and reports nothing', async () => {
+        given(BYPASS_ON_CLAUDE);
+        const { status, data } = await request(server, 'PATCH', '/api/config', {
+          master: { engine: 'codex', launchMode: 'fullAuto' }
+        });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchMode, 'fullAuto');
+        assert.equal(stored.launchModeEngine, 'codex');
+        assert.deepEqual(data.warnings, []);
+      });
+
+      it('leaves the mode alone on a save that does not change the engine, with an empty warnings list', async () => {
+        given(BYPASS_ON_CLAUDE);
+        const first = await request(server, 'PATCH', '/api/config', { master: { autoStart: true } });
+        assert.equal(first.status, 200);
+        assert.deepEqual(first.data.warnings, [], 'present and empty, not absent');
+        const again = await request(server, 'PATCH', '/api/config', { master: { engine: 'claude' } });
+        assert.equal(again.status, 200);
+        assert.deepEqual(again.data.warnings, []);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchMode, 'bypassPermissions');
+        assert.equal(stored.launchModeEngine, 'claude');
+        assert.equal(stored.autoStart, true);
+      });
+
+      it('records the engine with a mode chosen on its own', async () => {
+        given({ engine: 'codex' });
+        const { status } = await request(server, 'PATCH', '/api/config', { master: { launchMode: 'fullAuto' } });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchMode, 'fullAuto');
+        assert.equal(stored.launchModeEngine, 'codex');
+      });
+
+      it('resets a Master that follows the default engine when the default engine changes', async () => {
+        given({ engine: null, launchMode: 'bypassPermissions', launchModeEngine: 'claude' }, 'claude');
+        const { status, data } = await request(server, 'PATCH', '/api/config', { defaultEngine: 'codex' });
+        assert.equal(status, 200);
+        const config = store.config.load();
+        assert.equal(config.defaultEngine, 'codex');
+        assert.equal(config.master.launchMode, 'default');
+        assert.equal(config.master.launchModeEngine, null);
+        assert.match(data.warnings[0], /Bypass was chosen for Claude Code and does not carry to Codex/);
+      });
+
+      it('does not touch a pinned Master when the default engine changes', async () => {
+        given(BYPASS_ON_CLAUDE, 'claude');
+        const { status, data } = await request(server, 'PATCH', '/api/config', { defaultEngine: 'codex' });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchMode, 'bypassPermissions');
+        assert.equal(stored.launchModeEngine, 'claude');
+        assert.deepEqual(data.warnings, []);
+      });
+
+      it('reads the engine from both fields of one request, in either order', async () => {
+        // The pin is removed and the default engine changes in the same save.
+        // The Master ends on Codex whichever key the body lists first.
+        for (const body of [
+          { master: { engine: null }, defaultEngine: 'codex' },
+          { defaultEngine: 'codex', master: { engine: null } }
+        ]) {
+          given(BYPASS_ON_CLAUDE, 'claude');
+          const { status, data } = await request(server, 'PATCH', '/api/config', body);
+          assert.equal(status, 200);
+          assert.equal(store.config.load().master.launchMode, 'default', JSON.stringify(Object.keys(body)));
+          assert.equal(data.warnings.length, 1);
+        }
+        // And a pin that takes over the engine the default just left is no change.
+        given({ engine: null, launchMode: 'acceptEdits', launchModeEngine: 'claude' }, 'claude');
+        const kept = await request(server, 'PATCH', '/api/config', { defaultEngine: 'codex', master: { engine: 'claude' } });
+        assert.equal(kept.status, 200);
+        assert.equal(store.config.load().master.launchMode, 'acceptEdits');
+        assert.deepEqual(kept.data.warnings, []);
+      });
+
+      it('says so when a save sends back a mode that belongs to another engine, and does not move it', async () => {
+        // Recorded for Claude Code while the Master is set to Codex, which
+        // defines the same key. A form resends the mode on any save.
+        given({ engine: 'codex', launchMode: 'bypassPermissions', launchModeEngine: 'claude' });
+        const { status, data } = await request(server, 'PATCH', '/api/config', {
+          master: { launchMode: 'bypassPermissions', autoStart: true }
+        });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchModeEngine, 'claude');
+        assert.equal(stored.autoStart, true, 'the rest of the save still applies');
+        assert.equal(data.warnings.length, 1);
+        assert.match(data.warnings[0], /still Bypass, chosen for Claude Code, and is not used on Codex/);
+      });
+
+      it('refuses launchModeEngine from a caller, and stores nothing', async () => {
+        given(BYPASS_ON_CLAUDE);
+        const before = store.config.load().master;
+        const { status, data } = await request(server, 'PATCH', '/api/config', {
+          master: { engine: 'codex', launchMode: 'bypassPermissions', launchModeEngine: 'claude' }
+        });
+        assert.equal(status, 400);
+        assert.match(data.error, /master\.launchModeEngine is not a settable field/);
+        assert.deepEqual(store.config.load().master, before);
+      });
+
+      it('records the engine of a mode stored before the field existed, on the next save', async () => {
+        given({ engine: 'claude', launchMode: 'acceptEdits' });
+        const { status, data } = await request(server, 'PATCH', '/api/config', { master: { autoStart: true } });
+        assert.equal(status, 200);
+        const stored = store.config.load().master;
+        assert.equal(stored.launchMode, 'acceptEdits', 'an upgrade changes nothing about the mode');
+        assert.equal(stored.launchModeEngine, 'claude');
+        assert.deepEqual(data.warnings, []);
+      });
+
+      it('an access-level-only save still succeeds and changes nothing else (the Master bar\'s toggle, #2128)', async () => {
+        given(BYPASS_ON_CLAUDE);
+        const realApply = master.applyMasterAccessLevel;
+        // Stubbed for the reason the #755 case above gives: the real applier
+        // writes the operator's own Master home.
+        master.applyMasterAccessLevel = () => ({ applied: true, home: '/stub' });
+        try {
+          const before = store.config.load().master;
+          const { status, data } = await request(server, 'PATCH', '/api/config', { master: { accessLevel: 'write' } });
+          assert.equal(status, 200);
+          assert.deepEqual(store.config.load().master, { ...before, accessLevel: 'write' });
+          assert.deepEqual(data.warnings, []);
+        } finally {
+          master.applyMasterAccessLevel = realApply;
+        }
+      });
+
+      it('says a reset in the error too, when the same save could not apply an access level', async () => {
+        given(BYPASS_ON_CLAUDE);
+        const realApply = master.applyMasterAccessLevel;
+        master.applyMasterAccessLevel = () => { throw new Error('disk on fire'); };
+        try {
+          const { status, data } = await request(server, 'PATCH', '/api/config', {
+            master: { engine: 'codex', accessLevel: 'suggest' }
+          });
+          assert.equal(status, 500);
+          assert.equal(data.code, 'MASTER_LEVEL_NOT_APPLIED');
+          assert.match(data.error, /launch mode is reset to Interactive/,
+            'the save stood, so the mode it reset must not go unsaid');
+          assert.equal(store.config.load().master.launchMode, 'default');
+        } finally {
+          master.applyMasterAccessLevel = realApply;
+        }
+      });
+
+      it('a save that names neither engine field does not rewrite the stored Master block', async () => {
+        // A block as a hand edit or an older version left it: no recorded
+        // engine. A theme save has no business normalizing it.
+        const config = store.config.load();
+        config.defaultEngine = 'claude';
+        config.master = { accessLevel: 'read-only', launchMode: 'acceptEdits' };
+        store.config.save(config);
+        const { status, data } = await request(server, 'PATCH', '/api/config', { theme: 'dark' });
+        assert.equal(status, 200);
+        assert.deepEqual(store.config.load().master, { accessLevel: 'read-only', launchMode: 'acceptEdits' });
+        assert.deepEqual(data.warnings, []);
+      });
     });
 
     it('pushes a changed access level to the live master, and only when it changed (#755)', async () => {
