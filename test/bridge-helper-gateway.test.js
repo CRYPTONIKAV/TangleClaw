@@ -309,6 +309,47 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
     assert.equal(ws.sockets[1].sent[0].op, OP.IDENTIFY);
   });
 
+  it('abandons a hung handshake on the connect timeout and backs off (#2272)', async () => {
+    const gw = gateway({ connectTimeoutMs: 5000 });
+    gw.start();
+    await settle();
+    assert.equal(ws.sockets.length, 1);
+    assert.equal(gw.status().state, 'connecting');
+    assert.equal(typeof gw.status().stateChangedAt, 'number');
+    // The socket accepts the connection but never completes the handshake:
+    // no HELLO, no close, no error — the #2272 stuck state.
+    timers.fire('timeout');
+    await settle();
+    assert.equal(codes.at(-1)[0], 'gateway-connect-timeout');
+    assert.equal(gw.status().state, 'reconnecting');
+    assert.equal(ws.sockets[0].closedWith, RESUME_CLOSE, 'hung socket discarded');
+    assert.equal(ws.sockets.length, 1, 'no second socket yet — backoff first');
+    timers.fire('timeout');
+    await settle();
+    assert.equal(ws.sockets.length, 2, 'a fresh attempt follows the backoff');
+    gw.stop();
+  });
+
+  it('ignores a late discovery answer after the attempt timed out (#2272)', async () => {
+    let resolveDiscovery = null;
+    const discovery = new Promise((resolve) => { resolveDiscovery = resolve; });
+    const gw = gateway({ connectTimeoutMs: 5000, getUrl: () => discovery });
+    gw.start();
+    await settle();
+    assert.equal(ws.sockets.length, 0, 'nothing opens while discovery hangs');
+    timers.fire('timeout'); // connect attempt expires
+    await settle();
+    assert.equal(gw.status().state, 'reconnecting');
+    resolveDiscovery('wss://gateway-us-east1-b.discord.gg');
+    await settle();
+    assert.equal(ws.sockets.length, 0, 'late answer opens nothing');
+    timers.fire('timeout'); // backoff elapses: fresh attempt re-asks
+    await settle();
+    assert.equal(ws.sockets.length, 1, 'exactly one socket, no orphan');
+    assert.equal(gw.status().state, 'connecting');
+    gw.stop();
+  });
+
   it('backs off between reconnects, up to a ceiling, and stops when told to', async () => {
     assert.deepEqual([0, 1, 2, 10, 50].map((n) => backoffDelay(n, 1000, 60000, () => 0)), [500, 1000, 2000, 30000, 30000]);
     assert.deepEqual([0, 10].map((n) => backoffDelay(n, 1000, 60000, () => 0.999999)).map(Math.round), [1000, 60000]);
