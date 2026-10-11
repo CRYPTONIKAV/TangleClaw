@@ -4730,6 +4730,10 @@ route('GET', '/api/launch-sequences', (req, res) => {
       recoveryClearance: sequence.recoveryClearance,
       recoveryClearedAt: sequence.recoveryClearedAt,
       recoveryClearedBy: sequence.recoveryClearedBy,
+      // Whether this launch's session is still active, by the clear route's own
+      // judgement. A launch whose session has ended is refused there as
+      // `SESSION_ENDED`, so the panel needs this to stop offering that clear.
+      sessionActive: launchRecoveryClear.sessionIsActive(store.sessions.get(sequence.sessionId)),
       preflightVerdict: (sequence.preflight && sequence.preflight.verdict) || null,
       // The verdict WORD alone asks someone to grant `operator-verified` against
       // a cause they cannot see — "Recovery required: not-evaluated" beside a
