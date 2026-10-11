@@ -266,6 +266,7 @@ const gitTemplate = require('./lib/git-template');
 const tmux = require('./lib/tmux');
 const projects = require('./lib/projects');
 const sessions = require('./lib/sessions');
+const rulesChannel = require('./lib/session-rules-channel');
 const projectConfig = require('./lib/project-config');
 const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
@@ -6228,6 +6229,31 @@ route('PUT', '/api/session-rules/:id/status', (req, res, params, body) => {
       expectedContent: body.expectedContent
     });
     jsonResponse(res, 200, rule);
+    // #2273: shards are launch-time files — a mid-session status change must
+    // rewrite this project's shards from the in-force set, or the next /clear
+    // re-delivers stale rules. Best-effort by design (mirrors the launch
+    // path): a shard write never fails the status change itself.
+    // Known limit: budget resolves with a null profile (FALLBACK 16k), not the
+    // session's engine budget — a corpus between the two may split into fewer
+    // shards until the next launch rewrites them correctly. Transient and
+    // self-healing; strictly better than serving stale rules.
+    try {
+      const changedProject = store.projects.get(rule.projectId);
+      if (changedProject && changedProject.path) {
+        const section = sessions.buildStartupRulesSection(rule.projectId);
+        if (section.rules && section.rules.length > 0) {
+          const shards = rulesChannel.buildShards(
+            section.rules, rulesChannel.resolveChannelBudget(null));
+          rulesChannel.writeShards(changedProject.path, shards, section.rules.length);
+        } else {
+          rulesChannel.pruneShards(changedProject.path, 0);
+        }
+      }
+    } catch (refreshErr) {
+      log.warn('Failed to refresh session-rules shards after status change', {
+        ruleId: rule.id, projectId: rule.projectId, error: refreshErr.message
+      });
+    }
   } catch (err) {
     if (err.code === 'NOT_FOUND') return errorResponse(res, 404, err.message, 'NOT_FOUND');
     if (err.code === 'BAD_REQUEST') return errorResponse(res, 400, err.message, 'BAD_REQUEST');
