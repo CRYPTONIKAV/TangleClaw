@@ -261,6 +261,41 @@ describe('GET /api/launch-sequences (car 21.5)', () => {
       'the two provenance claims are alternatives: witnessing a failure is not the same as lacking a result');
   });
 
+  it('says whether each launch\'s session is active, as the clear route judges it (#2178)', async () => {
+    // One launch per way a session can stand. The expectation is the clear
+    // route's own judgement asked of the same row, so the read and the route
+    // cannot come to disagree about which launches have ended.
+    const launchRecoveryClear = require('../lib/launch-recovery-clear');
+    const end = {
+      [store.SESSION_STATUS.ACTIVE]: () => {},
+      [store.SESSION_STATUS.KILLED]: (id) => store.sessions.kill(id, 'test'),
+      [store.SESSION_STATUS.CRASHED]: (id) => store.sessions.markCrashed(id, 'test'),
+      [store.SESSION_STATUS.WRAPPED]: (id) => store.sessions.wrap(id, 'test')
+    };
+    assert.deepEqual(Object.keys(end).sort(), [...store.SESSION_STATUSES].sort(),
+      'every stored session status is exercised: a new one must be added here');
+    const dir = path.join(tmpDir, 'projects', 'status-read');
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = store.projects.create({ name: 'status-read', path: dir, engine: 'claude' });
+    const launched = new Map();
+    for (const status of store.SESSION_STATUSES) {
+      const { sequence, session } = bind(proj);
+      end[status](session.id);
+      assert.equal(store.sessions.get(session.id).status, status, `the fixture reached ${status}`);
+      launched.set(status, { sequence, session });
+    }
+    const res = await get(server, `/api/launch-sequences?projectId=${proj.id}`);
+    assert.equal(res.status, 200);
+    const byId = new Map(res.body.sequences.map((s) => [s.sequenceId, s]));
+    for (const [status, { sequence, session }] of launched) {
+      const seq = byId.get(sequence.id);
+      assert.ok(seq, `the ${status} session's launch is in the listing`);
+      assert.equal(seq.sessionActive, status === store.SESSION_STATUS.ACTIVE, `a ${status} session`);
+      assert.equal(seq.sessionActive, launchRecoveryClear.sessionIsActive(store.sessions.get(session.id)),
+        `the read agrees with the clear route's judgement for a ${status} session`);
+    }
+  });
+
   it('carries the served and acknowledged state per step', async () => {
     const id = { launchId: pulled.sequence.launchId, projectId: project.id };
     const first = launchSequence.next(id).body;

@@ -35,6 +35,31 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-10 — #2178: no Clear recovery button for a launch whose session has ended
+
+<!-- prawduct: type=bugfix | scope=2178-clear-recovery-ended-session -->
+#2178 Chunk 01, the issue's only chunk. Branch `fix/2178-clear-recovery-ended-session`, from `origin/main` `0ecaa758`.
+
+Visual change: yes
+
+**Why.** The Launch readiness panel rendered **Clear recovery** on every operator-held launch whose recovery was `required`, including one whose session had been killed, crashed or wrapped. `POST /api/sessions/:project/launch/recovery-clear` refuses that clear with `409 SESSION_ENDED` (#2049), the panel re-read after the refusal, and the same button was rendered again. `GET /api/launch-sequences` carried nothing about the session, so the panel could not tell an ended session's row from a live one.
+
+**What changed.**
+- `lib/launch-recovery-clear.js`: `sessionIsActive(session)` is the one judgement of whether a launch's session is still there for a clear to let through (a row whose stored status is `active`; a missing row is ended). `clearOneLaunch` uses it. The route's behaviour is unchanged.
+- `server.js`: each row of `GET /api/launch-sequences` carries `sessionActive`, from that same function. Nothing else in the file.
+- `public/ui.js`: `launchRecoveryHtml` renders, for an operator-mode `required` launch whose row says `sessionActive: false`, the verdict and cause as before, then a sentence in place of the button: the launch was never cleared, its session has ended, there is nothing to clear, and a new session of the project has a launch of its own.
+- `docs/configuration-reference.md` (the `GET /api/launch-sequences` row) and `docs/user-guide.md` (one bullet under the launch panel).
+
+**Decisions.**
+- [DECISION: the field is a boolean computed by the function the clear route refuses on, not the stored status word. | A status word would make the browser repeat the route's rule, and the two could then disagree. | The plan's assumption A1, kept.]
+- [DECISION: only an explicit `false` removes the button; a row with no such field, or `null`, keeps it. | A page served by a newer build can meet an older server's row during an update, and the route still decides either way. | The plan's assumption A2, kept.]
+- [DECISION: an ended session's row says nothing about the project's mode now ("its next launch will use that"). | That sentence exists to say this launch still waits for a clear while the project has moved on; an ended launch waits for nothing.]
+- [DECISION: advisory and cleared rows are untouched. | Neither ever had the button, which is the defect.]
+
+**Tests.** `test/api-launch-sequences.test.js`: one launch per stored session status (the test fails if a status is added and not exercised), each row's `sessionActive` held against `sessionIsActive` asked of the same session. `test/launch-readiness-panel.test.js`: the real `launchRecoveryHtml` in a `vm` context: no button and the sentence for `false`; cause and log pointer still shown; the button for `true`, absent, `undefined` and `null`; advisory and cleared rows unchanged. `test/launch-recovery-clear-ended.test.js`: for a killed, a crashed and a wrapped session, the row read over HTTP is rendered by the real panel function with no button, and the route answers `409 SESSION_ENDED` for that launch; for an active session the binding is read off the rendered button, sent, and the route clears it; a session that ends after the panel was read has its stale click refused and its re-read drops the button.
+
+**Not verified here.** The panel in a browser. The check is deferred, approved on this lane's row: TangleClaw-Builder1 does it on the live install after the deploy with the Operator's browser. The PR lists the screens and what each must show. The tests cover the exact markup the panel function returns, not layout at any width.
+
 ## 2026-10-10 — #2197: the Project Master's launch mode belongs to the engine it was chosen for (server)
 
 <!-- prawduct: type=bugfix | scope=master-2197 -->

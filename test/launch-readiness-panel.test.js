@@ -996,6 +996,59 @@ describe('the launch-readiness panel renders (Train 21, car 21.5)', () => {
       });
     });
 
+    describe('a held launch whose session has ended (#2178)', () => {
+      const held = (overrides) => row({
+        recovery: 'required', recoveryMode: 'operator', recoveryRevision: 3, preflightVerdict: 'handoff-behind', ...overrides
+      });
+
+      it('offers no clear, and says the session ended and a new one has a launch of its own', () => {
+        const html = render([held({ sessionActive: false })]);
+        assert.doesNotMatch(html, /data-launch-recovery-clear/, 'the route would refuse this clear as SESSION_ENDED');
+        assert.doesNotMatch(html, /<button[^>]*>Clear recovery/);
+        assert.match(html, /Recovery required/);
+        assert.match(html, /handoff-behind/, 'the verdict is still shown: the launch was held, and that is history worth reading');
+        assert.match(html, /Its session has ended, so there is nothing here to clear/);
+        assert.match(html, /a new session of this project has a launch of its own/);
+        assert.doesNotMatch(html, /until you clear it/, 'it does not ask for a clear it has just said cannot be made');
+      });
+
+      it('still states the cause and where to look for it', () => {
+        const html = render([held({
+          sessionActive: false, preflightVerdict: 'not-evaluated', preflightReason: 'the preflight threw', preflightEvaluationFailed: true
+        })]);
+        assert.match(html, /the preflight threw\./);
+        assert.match(html, /server log names the error/);
+      });
+
+      it('says nothing about the project\'s mode now: no launch of this session is waiting on it', () => {
+        assert.doesNotMatch(render([held({ sessionActive: false })], { projectRecoveryMode: 'advisory' }), /next launch|still waits for a clear/);
+      });
+
+      it('keeps the button for an active session', () => {
+        const html = render([held({ sessionActive: true })]);
+        assert.match(html, /data-launch-recovery-clear="9"/);
+        assert.match(html, /data-recovery-revision="3"/);
+        assert.doesNotMatch(html, /Its session has ended/);
+      });
+
+      it('keeps the button for a row that carries no such field: only the server\'s "no" removes it', () => {
+        for (const absent of [held({}), held({ sessionActive: undefined }), held({ sessionActive: null })]) {
+          const html = render([absent]);
+          assert.match(html, /data-launch-recovery-clear="9"/);
+          assert.doesNotMatch(html, /Its session has ended/);
+        }
+      });
+
+      it('changes nothing for an advisory launch or a cleared one, which never had the button', () => {
+        const advisory = render([held({ recoveryMode: 'advisory', sessionActive: false })]);
+        assert.match(advisory, /This launch froze advisory mode/);
+        assert.doesNotMatch(advisory, /Its session has ended/);
+        const cleared = render([held({ recovery: 'cleared', recoveryClearance: 'operator-verified', recoveryClearedBy: 'rosie', sessionActive: false })]);
+        assert.match(cleared, /cleared by rosie/);
+        assert.doesNotMatch(cleared, /Its session has ended/);
+      });
+    });
+
     describe('a held launch row', () => {
       const held = (recoveryMode) => row({ recovery: 'required', recoveryMode, preflightVerdict: 'handoff-behind' });
 
