@@ -377,6 +377,29 @@ describe('the register handshake has a deadline (#1131)', () => {
     l.stop();
   });
 
+  it('a retry scheduled by a superseded attempt never fires after registration (#2370)', async () => {
+    // The defect: `error` schedules a retry, a parallel attempt registers, and
+    // the stale timer still fires one backoff step later — replacing the
+    // healthy socket. Registration must disarm the pending retry.
+    const { factory, sockets } = makeFactory();
+    const l = new MedusaListener({
+      workspaceId: 'ws-1', handshakeTimeoutMs: 5000, backoffBaseMs: 30, wsFactory: factory
+    });
+    l.start();
+    sockets[0]._errorEvent('boom');
+    assert.ok(l._reconnectTimer, 'the error must schedule a retry');
+    // A parallel attempt connects and registers before the timer fires.
+    l._connect();
+    sockets[1]._open();
+    sockets[1]._message({ type: 'registered', workspaceId: 'ws-1' });
+    assert.equal(l.state, 'listening');
+    assert.equal(l._reconnectTimer, null, 'registration must disarm the retry');
+    await delay(150); // well past the 30ms backoff
+    assert.equal(sockets.length, 2, 'the stale retry must not open a third socket');
+    assert.equal(l._ws, sockets[1], 'the healthy socket stays installed');
+    l.stop();
+  });
+
   it('abandons the stalled socket rather than leaving it open and ignored', async () => {
     // The socket may be perfectly healthy, so nothing else will ever end it. An
     // abandoned-but-live socket keeps receiving frames the identity guard drops
